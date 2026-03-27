@@ -53,6 +53,7 @@ jobs:
 
       - name: Copy EXE to output folder
         run: |
+          New-Item -ItemType Directory -Force -Path "output" | Out-Null
           Copy-Item "dist\sensor_app.exe" "output\sensor_app.exe" -Force
 
       - name: Upload EXE as artifact
