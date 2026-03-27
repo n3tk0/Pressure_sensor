@@ -2027,7 +2027,7 @@ with dpg.window(tag="main_win"):
 
             # CWL auto-detect (§5.2.4b) — arm while water is at MWL (supply running, OF overflowing).
             # Auto-finds cutoff in history, captures CWL 2s later, and saves MWL from peak.
-            dpg.add_button(label="Arm CWL Auto-detect", callback=_arm_cwl_auto, width=-1)
+            dpg.add_button(label="Autodetect MWL/CWL", callback=_arm_cwl_auto, width=-1)
             dpg.bind_item_theme(dpg.last_item(), "theme_btn_action")
             # Manual fallback — press exactly 2s after cutting supply
             dpg.add_button(label="Set CWL (manual, 2s after cutoff)", callback=_set_cwl, width=-1)
