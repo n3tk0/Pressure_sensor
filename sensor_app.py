@@ -1523,6 +1523,7 @@ dpg.bind_theme("theme_dark")
 # Action button (teal accent) — for measurement capture actions
 with dpg.theme(tag="theme_btn_action"):
     with dpg.theme_component(dpg.mvButton):
+        dpg.add_theme_color(dpg.mvThemeCol_Text,          (240, 240, 240))
         dpg.add_theme_color(dpg.mvThemeCol_Button,        (40,  90,  90))
         dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (55, 115, 115))
         dpg.add_theme_color(dpg.mvThemeCol_ButtonActive,  (70, 140, 140))
@@ -1530,6 +1531,7 @@ with dpg.theme(tag="theme_btn_action"):
 # Danger button (red) — for stop/clear actions
 with dpg.theme(tag="theme_btn_danger"):
     with dpg.theme_component(dpg.mvButton):
+        dpg.add_theme_color(dpg.mvThemeCol_Text,          (240, 240, 240))
         dpg.add_theme_color(dpg.mvThemeCol_Button,        (100, 40,  50))
         dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (130, 55,  65))
         dpg.add_theme_color(dpg.mvThemeCol_ButtonActive,  (160, 70,  80))
@@ -1537,6 +1539,7 @@ with dpg.theme(tag="theme_btn_danger"):
 # Success button (green) — for start/log actions
 with dpg.theme(tag="theme_btn_success"):
     with dpg.theme_component(dpg.mvButton):
+        dpg.add_theme_color(dpg.mvThemeCol_Text,          (240, 240, 240))
         dpg.add_theme_color(dpg.mvThemeCol_Button,        (35,  90,  55))
         dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (50, 115,  70))
         dpg.add_theme_color(dpg.mvThemeCol_ButtonActive,  (65, 140,  85))
