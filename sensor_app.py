@@ -450,6 +450,13 @@ COL_ORANGE = (250, 179, 90)
 COL_BLUE = (30, 102, 245)
 COL_WHITE = (205, 214, 244)
 
+# Light-mode equivalents — saturated, dark enough on white background
+_LT_ACCENT = (28,  95, 210)
+_LT_GREEN  = (25, 130,  55)
+_LT_RED    = (190,  38,  68)
+_LT_ORANGE = (175,  88,   0)
+_LT_GRAY   = ( 90,  90, 115)
+
 def _toggle_connect():
     if app.is_connected:
         app.disconnect()
@@ -468,7 +475,7 @@ def _toggle_connect():
         elif app.last_error:
             dpg.configure_item("lbl_conn",      default_value=app.last_error)
             dpg.configure_item("lbl_conn_icon", default_value="●", color=COL_RED)
-            dpg.bind_item_theme("lbl_conn", "theme_red")
+            _bind_status("lbl_conn", "theme_red")
 
 def _set_mwl():
     val = app.get_avg_height()
@@ -482,7 +489,7 @@ def _set_meniscus():
     if app.profile.overflow <= 0:
         # Show a non-blocking warning in the status label temporarily
         dpg.set_value("lbl_cwl_st", "⚠ Set Overflow in Calibration first!")
-        dpg.bind_item_theme("lbl_cwl_st", "theme_orange")
+        _bind_status("lbl_cwl_st", "theme_orange")
         return
     measured_level = app.get_avg_height()
     app.profile.meniscus = app.profile.overflow - measured_level
@@ -631,13 +638,13 @@ def _refresh_limits():
         m = p.water_discharge - p.cwl
         if m >= 20:
             dpg.set_value("lbl_margin", f"MARGIN: OK ({m:.1f}mm)")
-            dpg.bind_item_theme("lbl_margin", "theme_green")
+            _bind_status("lbl_margin", "theme_green")
         else:
             dpg.set_value("lbl_margin", f"MARGIN: FAIL ({m:.1f}mm < 20)")
-            dpg.bind_item_theme("lbl_margin", "theme_red")
+            _bind_status("lbl_margin", "theme_red")
     else:
         dpg.set_value("lbl_margin", "MARGIN: WAITING")
-        dpg.bind_item_theme("lbl_margin", "theme_gray")
+        _bind_status("lbl_margin", "theme_gray")
 
 def _toggle_log():
     if not app.is_logging:
@@ -1198,6 +1205,16 @@ def _show_toast(msg: str):
     """Briefly display a message in the delta label."""
     dpg.set_value("lbl_delta", msg)
 
+def _bind_status(item: str, base_tag: str):
+    """Bind the correct dark or light variant of a status text-color theme."""
+    is_light = app.app_settings.get("ui_theme", "Dark") == "Light"
+    tag = base_tag + ("_lt" if is_light else "")
+    if not dpg.does_item_exist(tag):
+        tag = base_tag          # fall back to dark if light variant missing
+    dpg.bind_item_theme(item, tag)
+    # Track for _apply_theme reruns
+    setattr(app, f"_{item}_theme", base_tag)
+
 # ── Main loop callbacks ────────────────────────────────────────────
 def update_ui():
     with app.data_lock:
@@ -1225,10 +1242,10 @@ def update_ui():
                 app.cwl_state = "WAITING"
                 app.cwl_timer = time.time()
             dpg.set_value("lbl_cwl_st", f"CWL: ARMED (drop >= {thresh}mm)")
-            dpg.bind_item_theme("lbl_cwl_st", "theme_blue")
+            _bind_status("lbl_cwl_st", "theme_blue")
         else:
             dpg.set_value("lbl_cwl_st", "CWL: ARMED (Manual)")
-            dpg.bind_item_theme("lbl_cwl_st", "theme_blue")
+            _bind_status("lbl_cwl_st", "theme_blue")
     elif app.cwl_state == "WAITING":
         rem = 2.0 - (time.time() - app.cwl_timer)
         if rem <= 0:
@@ -1236,10 +1253,10 @@ def update_ui():
             app.cwl_state = "DONE"
             _refresh_limits()
             dpg.set_value("lbl_cwl_st", "CWL: CAPTURED")
-            dpg.bind_item_theme("lbl_cwl_st", "theme_green")
+            _bind_status("lbl_cwl_st", "theme_green")
         else:
             dpg.set_value("lbl_cwl_st", f"CWL: TIMER {rem:.1f}s")
-            dpg.bind_item_theme("lbl_cwl_st", "theme_orange")
+            _bind_status("lbl_cwl_st", "theme_orange")
 
 def update_chart():
     with app.data_lock:
@@ -1369,33 +1386,45 @@ if _font_ui:
     dpg.bind_font(_font_ui)   # apply globally — replaces ProggyClean
 
 # Themes
+# ── Status text color themes — dark variants ─────────────────────────
 with dpg.theme(tag="theme_green"):
     with dpg.theme_component(dpg.mvAll):
         dpg.add_theme_color(dpg.mvThemeCol_Text, COL_GREEN)
-
 with dpg.theme(tag="theme_red"):
     with dpg.theme_component(dpg.mvAll):
         dpg.add_theme_color(dpg.mvThemeCol_Text, COL_RED)
-
 with dpg.theme(tag="theme_gray"):
     with dpg.theme_component(dpg.mvAll):
         dpg.add_theme_color(dpg.mvThemeCol_Text, COL_GRAY)
-
 with dpg.theme(tag="theme_blue"):
     with dpg.theme_component(dpg.mvAll):
         dpg.add_theme_color(dpg.mvThemeCol_Text, COL_ACCENT)
-
 with dpg.theme(tag="theme_orange"):
     with dpg.theme_component(dpg.mvAll):
         dpg.add_theme_color(dpg.mvThemeCol_Text, COL_ORANGE)
-
 with dpg.theme(tag="theme_accent_text"):
     with dpg.theme_component(dpg.mvAll):
         dpg.add_theme_color(dpg.mvThemeCol_Text, COL_ACCENT)
-
 with dpg.theme(tag="theme_green_text"):
     with dpg.theme_component(dpg.mvAll):
         dpg.add_theme_color(dpg.mvThemeCol_Text, COL_GREEN)
+
+# ── Status text color themes — light variants ─────────────────────────
+with dpg.theme(tag="theme_green_lt"):
+    with dpg.theme_component(dpg.mvAll):
+        dpg.add_theme_color(dpg.mvThemeCol_Text, _LT_GREEN)
+with dpg.theme(tag="theme_red_lt"):
+    with dpg.theme_component(dpg.mvAll):
+        dpg.add_theme_color(dpg.mvThemeCol_Text, _LT_RED)
+with dpg.theme(tag="theme_gray_lt"):
+    with dpg.theme_component(dpg.mvAll):
+        dpg.add_theme_color(dpg.mvThemeCol_Text, _LT_GRAY)
+with dpg.theme(tag="theme_blue_lt"):
+    with dpg.theme_component(dpg.mvAll):
+        dpg.add_theme_color(dpg.mvThemeCol_Text, _LT_ACCENT)
+with dpg.theme(tag="theme_orange_lt"):
+    with dpg.theme_component(dpg.mvAll):
+        dpg.add_theme_color(dpg.mvThemeCol_Text, _LT_ORANGE)
 
 with dpg.theme(tag="theme_dark"):
     with dpg.theme_component(dpg.mvAll):
@@ -1454,8 +1483,39 @@ with dpg.theme(tag="theme_light"):
         dpg.add_theme_color(dpg.mvPlotCol_AxisText, (76, 79, 105))
         dpg.add_theme_color(dpg.mvPlotCol_AxisGrid, (200, 204, 215))
 
-def _apply_theme(mode):
-    dpg.bind_theme("theme_dark" if mode == "Dark" else "theme_light")
+def _apply_theme(mode: str):
+    """Switch between Dark and Light themes, recoloring all hardcoded items."""
+    is_dark = (mode != "Light")
+    dpg.bind_theme("theme_dark" if is_dark else "theme_light")
+
+    # Colors for this mode
+    acc   = COL_ACCENT if is_dark else _LT_ACCENT
+    grn   = COL_GREEN  if is_dark else _LT_GREEN
+    gry   = COL_GRAY   if is_dark else _LT_GRAY
+
+    # ── Section headers & live-data labels (hardcoded color= at creation) ──
+    for tag in ("hdr_live", "hdr_limits", "hdr_flush", "hdr_log"):
+        if dpg.does_item_exist(tag):
+            dpg.configure_item(tag, color=acc)
+    for tag in ("lbl_h",):
+        if dpg.does_item_exist(tag):
+            dpg.configure_item(tag, color=acc)
+    for tag in ("lbl_v",):
+        if dpg.does_item_exist(tag):
+            dpg.configure_item(tag, color=grn)
+    for tag in ("lbl_p", "lbl_conn"):
+        if dpg.does_item_exist(tag):
+            dpg.configure_item(tag, color=gry)
+
+    # Store mode first so _bind_status picks the correct variant below
+    app.app_settings["ui_theme"] = mode
+
+    # Re-bind all tracked status labels — _bind_status reads ui_theme to choose dark/lt variant
+    for item in ("lbl_margin", "lbl_cwl_st", "lbl_flush"):
+        if dpg.does_item_exist(item):
+            base = getattr(app, f"_{item}_theme", None)
+            if base:
+                _bind_status(item, base)
 
 dpg.bind_theme("theme_dark")
 
@@ -1524,7 +1584,7 @@ with dpg.window(tag="main_win"):
         with dpg.child_window(width=295, border=False):
 
             # Section: Real-Time Data
-            dpg.add_text("  LIVE DATA", color=COL_ACCENT)
+            dpg.add_text("  LIVE DATA", color=COL_ACCENT, tag="hdr_live")
             dpg.add_separator()
             dpg.add_spacer(height=2)
             dpg.add_text("0.0 mm",     tag="lbl_h", color=COL_ACCENT)
@@ -1534,7 +1594,7 @@ with dpg.window(tag="main_win"):
             dpg.add_spacer(height=10)
 
             # Section: EN 14055 Limits — capture buttons
-            dpg.add_text("  EN 14055 LIMITS", color=COL_ACCENT)
+            dpg.add_text("  EN 14055 LIMITS", color=COL_ACCENT, tag="hdr_limits")
             dpg.add_separator()
             dpg.add_spacer(height=2)
 
@@ -1589,14 +1649,14 @@ with dpg.window(tag="main_win"):
 
             # Compliance status
             dpg.add_text("MARGIN: WAITING", tag="lbl_margin")
-            dpg.bind_item_theme("lbl_margin", "theme_gray")
+            _bind_status("lbl_margin", "theme_gray")
             dpg.add_text("CWL: IDLE", tag="lbl_cwl_st")
-            dpg.bind_item_theme("lbl_cwl_st", "theme_gray")
+            _bind_status("lbl_cwl_st", "theme_gray")
 
             dpg.add_spacer(height=10)
 
             # Section: Flush Test
-            dpg.add_text("  FLUSH TEST  (EN 14055)", color=COL_ACCENT)
+            dpg.add_text("  FLUSH TEST  (EN 14055)", color=COL_ACCENT, tag="hdr_flush")
             dpg.add_separator()
             dpg.add_spacer(height=2)
 
@@ -1626,7 +1686,7 @@ with dpg.window(tag="main_win"):
             dpg.add_spacer(height=10)
 
             # Section: Data Log
-            dpg.add_text("  DATA LOG", color=COL_ACCENT)
+            dpg.add_text("  DATA LOG", color=COL_ACCENT, tag="hdr_log")
             dpg.add_separator()
             dpg.add_spacer(height=2)
             dpg.add_button(label="Start Data Log (CSV)", tag="btn_log",
