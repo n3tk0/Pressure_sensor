@@ -101,8 +101,8 @@ def load_settings():
             with open(SETTINGS_FILE) as f:
                 d = json.load(f)
                 return d.get("conn", dict(DEFAULT_CONN)), d.get("app", dict(DEFAULT_APP))
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning(f"Could not load settings, using defaults: {e}")
     return dict(DEFAULT_CONN), dict(DEFAULT_APP)
 
 def save_settings(conn, app):
@@ -110,8 +110,8 @@ def save_settings(conn, app):
         CONFIG_DIR.mkdir(exist_ok=True)
         with open(SETTINGS_FILE, "w") as f:
             json.dump({"conn": conn, "app": app}, f, indent=2)
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning(f"Could not save settings: {e}")
 
 # ── Profile ─────────────────────────────────────────────────────────
 class CisternProfile:
@@ -202,8 +202,9 @@ def interp_hv(p_bar, pts):
     global _interp_expected_version
     if not pts:
         return 0.0, 0.0
-    # Rebuild cache if version mismatch (cache was rebuilt externally)
+    # Rebuild cache if stale (e.g. profile changed between calls)
     if _interp_expected_version != _interp_cache_version:
+        _rebuild_interp_cache(pts)
         _interp_expected_version = _interp_cache_version
     sp = _sorted_pts_cache
     if len(sp) == 1:
@@ -246,13 +247,14 @@ class SensorApp:
             try:
                 with open(_default) as _f:
                     self.profile.from_dict(json.load(_f))
-            except Exception:
-                pass
+            except Exception as e:
+                logging.warning(f"Could not load default profile, starting blank: {e}")
         self.serial_conn = None
         self.is_connected = False
         self.is_logging = False
         self.csv_file = None
         self.csv_writer = None
+        self._csv_row_count = 0
 
         self.last_error = ""
         self.stop_event = threading.Event()
@@ -353,7 +355,8 @@ class SensorApp:
                                             f"{h:.1f}", f"{v:.2f}", f"{f_rate:.3f}"
                                         ])
                                         # Flush CSV every 50 rows to prevent data loss on crash
-                                        if self.csv_file and len(self.t_buf) % 50 == 0:
+                                        self._csv_row_count += 1
+                                        if self.csv_file and self._csv_row_count % 50 == 0:
                                             self.csv_file.flush()
                         except (json.JSONDecodeError, struct.error, ValueError) as e:
                             logging.debug(f"Parse error: {e}")
@@ -407,8 +410,8 @@ class SensorApp:
         if self.serial_conn:
             try:
                 self.serial_conn.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logging.warning(f"Error closing serial port: {e}")
         self.is_connected = False
         self.serial_conn = None
 
@@ -419,7 +422,12 @@ class SensorApp:
             if not self.h_buf:
                 return self.current_height
             now = self.t_buf[-1]
-            vals = [self.h_buf[i] for i in range(len(self.h_buf)) if now - self.t_buf[i] <= window]
+            # Traverse from newest to oldest — stop as soon as we leave the window
+            vals = []
+            for t, h in zip(reversed(self.t_buf), reversed(self.h_buf)):
+                if now - t > window:
+                    break
+                vals.append(h)
             return sum(vals) / len(vals) if vals else self.current_height
 
     def recalc_from_pressure(self):
@@ -429,6 +437,27 @@ class SensorApp:
             with self.data_lock:
                 self.current_height = h
                 self.current_volume = v
+
+    def tick_cwl(self, h: float, h_history: list) -> bool:
+        """Advance CWL state machine. Returns True when state just became DONE
+        (caller should call _refresh_limits to update the UI limit display)."""
+        if self.cwl_state == "ARMED":
+            if self.app_settings.get("cwl_mode") == "Automatic":
+                alg = self.app_settings.get("cwl_smooth", "None")
+                sm_h = smooth(h_history, alg)
+                val = sm_h[-1] if sm_h else h
+                if val > self.cwl_peak:
+                    self.cwl_peak = val
+                thresh = self.app_settings.get("cwl_drop_thresh", 1.5)
+                if self.cwl_peak - val >= thresh:
+                    self.cwl_state = "WAITING"
+                    self.cwl_timer = time.time()
+        elif self.cwl_state == "WAITING":
+            if time.time() - self.cwl_timer >= 2.0:
+                self.profile.cwl = self.get_avg_height()
+                self.cwl_state = "DONE"
+                return True
+        return False
 
     def cleanup(self):
         save_settings(self.conn_params, self.app_settings)
@@ -659,8 +688,9 @@ def _toggle_log():
             app.is_logging = True
             dpg.set_item_label("btn_log", "Stop Data Log")
             dpg.bind_item_theme("btn_log", "theme_btn_danger")
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning(f"Failed to open CSV log: {e}")
+            _show_toast(f"Log failed: {e}")
     else:
         app.is_logging = False
         dpg.set_item_label("btn_log", "Start Data Log (CSV)")
@@ -668,6 +698,8 @@ def _toggle_log():
         if app.csv_file:
             app.csv_file.close()
             app.csv_file = None
+            app.csv_writer = None
+            app._csv_row_count = 0
 
 def _toggle_pause():
     app.chart_paused = not app.chart_paused
@@ -893,8 +925,8 @@ def _open_calibration_dlg():
             clone.name = dpg.get_value("cal_name")
             clone.overflow = float(dpg.get_value("cal_over").replace(",", "."))
             clone.water_discharge = float(dpg.get_value("cal_wd").replace(",", "."))
-        except ValueError:
-            pass
+        except ValueError as e:
+            logging.warning(f"Invalid calibration value: {e}")
         app.profile = clone
         _rebuild_interp_cache(app.profile.points)
         app.recalc_from_pressure()
@@ -967,27 +999,18 @@ def _cal_export_json(profile_clone):
     except OSError as e:
         logging.error(f"Cal JSON export failed: {e}")
 
-# Shared mutable holder so the file-dialog callback can reach the clone + refresh fn
-_cal_import_ctx: dict = {}
-
 def _cal_import(profile_clone, refresh_fn):
-    """Open file dialog to import calibration points (JSON)."""
-    _cal_import_ctx["clone"] = profile_clone
-    _cal_import_ctx["refresh"] = refresh_fn
+    """Open file dialog to import calibration points (JSON/CSV)."""
     if dpg.does_item_exist("fd_cal_import"):
         dpg.delete_item("fd_cal_import")
     with dpg.file_dialog(label="Import Calibration Points",
-                          callback=_cal_import_cb,
+                          callback=lambda s, a: _cal_import_cb(s, a, profile_clone, refresh_fn),
                           tag="fd_cal_import", width=620, height=420):
         dpg.add_file_extension(".json", color=(137, 180, 250))
 
-def _cal_import_cb(sender, app_data):
+def _cal_import_cb(sender, app_data, profile_clone, refresh_fn):
     fp = app_data.get("file_path_name", "")
     if not fp:
-        return
-    clone   = _cal_import_ctx.get("clone")
-    refresh = _cal_import_ctx.get("refresh")
-    if clone is None:
         return
     try:
         fp = Path(fp)
@@ -1011,9 +1034,8 @@ def _cal_import_cb(sender, app_data):
                     "h": float(row.get("h", 0)),
                     "v": float(row.get("v", 0)),
                 })
-        clone.points = new_pts
-        if refresh:
-            refresh()
+        profile_clone.points = new_pts
+        refresh_fn()
         _show_toast(f"Imported {len(new_pts)} points from {fp.name}")
     except Exception as e:
         logging.error(f"Cal import failed: {e}")
@@ -1201,9 +1223,24 @@ def _reset_app_settings():
     _refresh_limits()
     _show_toast("Settings reset to defaults.")
 
-def _show_toast(msg: str):
-    """Briefly display a message in the delta label."""
+_toast_msg: str = ""
+_toast_clear_at: float = 0.0
+
+def _show_toast(msg: str, duration: float = 3.0):
+    """Display a message in the delta label; auto-clears after `duration` seconds."""
+    global _toast_msg, _toast_clear_at
+    _toast_msg = msg
+    _toast_clear_at = time.time() + duration
     dpg.set_value("lbl_delta", msg)
+
+def _check_toast_dismiss(now: float):
+    """Call once per UI tick to auto-clear the toast when its timer expires."""
+    global _toast_clear_at, _toast_msg
+    if _toast_clear_at > 0 and now >= _toast_clear_at:
+        if dpg.get_value("lbl_delta") == _toast_msg:
+            dpg.set_value("lbl_delta", "---")
+        _toast_clear_at = 0.0
+        _toast_msg = ""
 
 def _bind_status(item: str, base_tag: str):
     """Bind the correct dark or light variant of a status text-color theme."""
@@ -1221,7 +1258,6 @@ def update_ui():
         h = app.current_height
         v = app.current_volume
         p = app.current_pressure
-        h_history = list(app.h_buf)[-150:] if app.h_buf else [h]
 
     dpg.set_value("lbl_h", f"{h:.1f} mm")
     dpg.set_value("lbl_v", f"{v:.2f} L")
@@ -1229,34 +1265,24 @@ def update_ui():
 
     # Connection status icon is updated on connect/disconnect events, not every frame
 
-    # CWL logic
+    # CWL status label — state transitions happen in app.tick_cwl (called from frame_callback)
+    thresh = app.app_settings.get("cwl_drop_thresh", 1.5)
     if app.cwl_state == "ARMED":
         if app.app_settings.get("cwl_mode") == "Automatic":
-            alg = app.app_settings.get("cwl_smooth", "None")
-            sm_h = smooth(h_history, alg)
-            val = sm_h[-1] if sm_h else h
-            if val > app.cwl_peak:
-                app.cwl_peak = val
-            thresh = app.app_settings.get("cwl_drop_thresh", 1.5)
-            if app.cwl_peak - val >= thresh:
-                app.cwl_state = "WAITING"
-                app.cwl_timer = time.time()
             dpg.set_value("lbl_cwl_st", f"CWL: ARMED (drop >= {thresh}mm)")
-            _bind_status("lbl_cwl_st", "theme_blue")
         else:
             dpg.set_value("lbl_cwl_st", "CWL: ARMED (Manual)")
-            _bind_status("lbl_cwl_st", "theme_blue")
+        _bind_status("lbl_cwl_st", "theme_blue")
     elif app.cwl_state == "WAITING":
-        rem = 2.0 - (time.time() - app.cwl_timer)
-        if rem <= 0:
-            app.profile.cwl = app.get_avg_height()
-            app.cwl_state = "DONE"
-            _refresh_limits()
-            dpg.set_value("lbl_cwl_st", "CWL: CAPTURED")
-            _bind_status("lbl_cwl_st", "theme_green")
-        else:
-            dpg.set_value("lbl_cwl_st", f"CWL: TIMER {rem:.1f}s")
-            _bind_status("lbl_cwl_st", "theme_orange")
+        rem = max(0.0, 2.0 - (time.time() - app.cwl_timer))
+        dpg.set_value("lbl_cwl_st", f"CWL: TIMER {rem:.1f}s")
+        _bind_status("lbl_cwl_st", "theme_orange")
+    elif app.cwl_state == "DONE":
+        dpg.set_value("lbl_cwl_st", "CWL: CAPTURED")
+        _bind_status("lbl_cwl_st", "theme_green")
+    else:
+        dpg.set_value("lbl_cwl_st", "CWL: IDLE")
+        _bind_status("lbl_cwl_st", "theme_gray")
 
 def update_chart():
     with app.data_lock:
@@ -1357,7 +1383,13 @@ def frame_callback():
     chart_interval = app.app_settings.get("chart_refresh_ms", 100) / 1000.0
 
     if now - app._last_ui_tick >= ui_interval:
+        with app.data_lock:
+            h = app.current_height
+            h_history = list(app.h_buf)[-150:] if app.h_buf else [h]
+        if app.tick_cwl(h, h_history):
+            _refresh_limits()
         update_ui()
+        _check_toast_dismiss(now)
         app._last_ui_tick = now
     if now - app._last_chart_tick >= chart_interval:
         update_chart()
@@ -1842,6 +1874,10 @@ try:
     app.connect()
     if app.is_connected:
         dpg.set_item_label("btn_connect", "Disconnect")
+        dpg.configure_item("lbl_conn",
+                           default_value=f"{app.conn_params['port']}  {app.conn_params['baud']}bd")
+        dpg.configure_item("lbl_conn_icon", default_value="●", color=COL_GREEN)
+        dpg.bind_item_theme("btn_connect", "theme_btn_danger")
 
     while dpg.is_dearpygui_running():
         frame_callback()
