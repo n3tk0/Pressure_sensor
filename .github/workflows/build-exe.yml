@@ -51,23 +51,9 @@ jobs:
             exit 1
           }
 
-      - name: Copy EXE to output folder
-        run: |
-          New-Item -ItemType Directory -Force -Path "output" | Out-Null
-          Copy-Item "dist\sensor_app.exe" "output\sensor_app.exe" -Force
-
       - name: Upload EXE as artifact
         uses: actions/upload-artifact@v4
         with:
           name: sensor_app-windows
           path: dist/sensor_app.exe
           retention-days: 30
-
-      - name: Commit updated EXE to output folder
-        if: github.event_name == 'push'
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add output/sensor_app.exe
-          git diff --staged --quiet || git commit -m "chore: rebuild sensor_app.exe [skip ci]"
-          git push

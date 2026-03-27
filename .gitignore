@@ -1,2 +1,8 @@
 EN14055.pdf
 make_screenshots.py
+
+# Built executables — downloaded from GitHub Actions artifacts, not tracked in git
+output/*.exe
+dist/
+build/
+*.spec.bak
