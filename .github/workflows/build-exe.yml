@@ -1,0 +1,69 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - 'claude/**'
+    paths:
+      - 'sensor_app.py'
+      - 'sensor_app.spec'
+      - 'fonts/**'
+      - 'icon.ico'
+      - '.github/workflows/build-exe.yml'
+  workflow_dispatch:   # allow manual trigger from GitHub Actions tab
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller dearpygui pyserial
+
+      - name: Build EXE with PyInstaller
+        run: |
+          pyinstaller sensor_app.spec --clean --noconfirm
+
+      - name: Verify EXE was created
+        run: |
+          if (Test-Path "dist\sensor_app.exe") {
+            $size = (Get-Item "dist\sensor_app.exe").length / 1MB
+            Write-Host "sensor_app.exe built successfully ($([math]::Round($size,1)) MB)"
+          } else {
+            Write-Error "Build failed — sensor_app.exe not found"
+            exit 1
+          }
+
+      - name: Copy EXE to output folder
+        run: |
+          Copy-Item "dist\sensor_app.exe" "output\sensor_app.exe" -Force
+
+      - name: Upload EXE as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sensor_app-windows
+          path: dist/sensor_app.exe
+          retention-days: 30
+
+      - name: Commit updated EXE to output folder
+        if: github.event_name == 'push'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add output/sensor_app.exe
+          git diff --staged --quiet || git commit -m "chore: rebuild sensor_app.exe [skip ci]"
+          git push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
