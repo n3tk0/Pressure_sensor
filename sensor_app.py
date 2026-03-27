@@ -286,6 +286,7 @@ class SensorApp:
         self.current_height = 0.0
         self.current_volume = 0.0
         self.current_flow = 0.0
+        self.current_temperature = None   # °C from pdin bytes 4-7; None if sensor doesn't report it
 
         self.cwl_state = "IDLE"       # RWL detection state
         self.cwl_peak = 0.0
@@ -362,6 +363,11 @@ class SensorApp:
                                     raw = struct.unpack(">i", bytes.fromhex(hx[:8]))[0]
                                     p_bar = raw * 0.0001
                                     h, v = interp_hv(p_bar, self.profile.points)
+                                    # Temperature from bytes 4-7 of pdin (PI1789: 0.1°C/LSB)
+                                    temp_c = None
+                                    if len(hx) >= 16:
+                                        raw_t = struct.unpack(">i", bytes.fromhex(hx[8:16]))[0]
+                                        temp_c = raw_t * 0.1
                                     with self.data_lock:
                                         t = time.time() - self.start_time
                                         f_rate = 0.0
@@ -373,6 +379,8 @@ class SensorApp:
                                         self.current_height = h
                                         self.current_volume = v
                                         self.current_flow = f_rate
+                                        if temp_c is not None:
+                                            self.current_temperature = temp_c
                                         self.t_buf.append(t)
                                         self.h_buf.append(h)
                                         self.v_buf.append(v)
@@ -387,10 +395,11 @@ class SensorApp:
 
                                     with self._csv_lock:
                                         if self.is_logging and self.csv_writer:
+                                            t_str = f"{temp_c:.1f}" if temp_c is not None else ""
                                             self.csv_writer.writerow([
                                                 datetime.now().isoformat(),
                                                 p_format(p_bar).split()[0],
-                                                f"{h:.1f}", f"{v:.2f}", f"{f_rate:.3f}"
+                                                f"{h:.1f}", f"{v:.2f}", f"{f_rate:.3f}", t_str
                                             ])
                                             # Flush CSV every 50 rows to prevent data loss on crash
                                             self._csv_row_count += 1
@@ -984,7 +993,7 @@ def _toggle_log():
             app.csv_file = open(fn, "w", newline="")
             app.csv_writer = csv.writer(app.csv_file)
             _pu = PRESSURE_UNITS.get(app.app_settings.get("pressure_unit", "bar"), (1.0, "bar"))[1]
-            app.csv_writer.writerow(["Timestamp", f"P({_pu})", "H(mm)", "V(L)", "F(L/s)"])
+            app.csv_writer.writerow(["Timestamp", f"P({_pu})", "H(mm)", "V(L)", "F(L/s)", "T(C)"])
             app.is_logging = True
             dpg.set_item_label("btn_log", "Stop Data Log")
             dpg.bind_item_theme("btn_log", "theme_btn_danger")
@@ -1571,12 +1580,15 @@ def update_ui():
         v = app.current_volume
         p = app.current_pressure
         f = app.current_flow
+        temp = app.current_temperature
 
     dpg.set_value("lbl_h", f"{h:.1f} mm")
     dpg.set_value("lbl_v", f"{v:.2f} L")
     dpg.set_value("lbl_p", p_format(p))
     if dpg.does_item_exist("lbl_f"):
         dpg.set_value("lbl_f", f"{f:.3f} L/s")
+    if dpg.does_item_exist("lbl_temp"):
+        dpg.set_value("lbl_temp", f"{temp:.1f} \u00b0C" if temp is not None else "-- \u00b0C")
 
     # Live headroom to overflow = OF − current height (live indicator, not EN14055 §5.2.6 "c")
     of = app.profile.overflow
@@ -1899,7 +1911,7 @@ def _apply_theme(mode: str):
     for tag in ("lbl_v",):
         if dpg.does_item_exist(tag):
             dpg.configure_item(tag, color=grn)
-    for tag in ("lbl_p", "lbl_conn"):
+    for tag in ("lbl_p", "lbl_conn", "lbl_temp"):
         if dpg.does_item_exist(tag):
             dpg.configure_item(tag, color=gry)
     for tag in ("lbl_f",):
@@ -1996,6 +2008,7 @@ with dpg.window(tag="main_win"):
             dpg.add_text("0.00 L",     tag="lbl_v", color=COL_GREEN)
             dpg.add_text("0.0000 bar", tag="lbl_p", color=COL_GRAY)
             dpg.add_text("0.000 L/s",  tag="lbl_f", color=COL_ORANGE)
+            dpg.add_text("-- °C",      tag="lbl_temp", color=COL_GRAY)
 
             dpg.add_spacer(height=8)
 
@@ -2248,6 +2261,7 @@ if _font_large:
 if _font_medium:
     dpg.bind_item_font("lbl_p", _font_medium)
     dpg.bind_item_font("lbl_f", _font_medium)
+    dpg.bind_item_font("lbl_temp", _font_medium)
     # Limit value labels — slightly larger for readability
     for _tag in ("lbl_mwl", "lbl_mwl_fault", "lbl_cwl", "lbl_menis",
                  "lbl_overflow", "lbl_residual", "lbl_safety_margin",
