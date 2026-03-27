@@ -23,8 +23,21 @@ from datetime import datetime
 
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s")
 
+# ── Runtime base directory (works both as .py and as single-file exe) ──
+# auto-py-to-exe / PyInstaller sets sys.frozen; sys.executable is the .exe path.
+if getattr(sys, "frozen", False):
+    BASE_DIR = Path(sys.executable).parent   # folder that contains the .exe
+else:
+    BASE_DIR = Path(__file__).parent         # folder that contains sensor_app.py
+
+CONFIG_DIR = BASE_DIR / "config"
+EXPORT_DIR = BASE_DIR / "exports"
+
+for _d in (CONFIG_DIR, EXPORT_DIR):
+    _d.mkdir(exist_ok=True)
+
 # ── Font discovery ───────────────────────────────────────────────────
-_SCRIPT_DIR = Path(__file__).parent
+_SCRIPT_DIR = BASE_DIR
 
 def _find_font(name_hints: list[str]) -> str | None:
     """
@@ -64,20 +77,27 @@ logging.info(f"UI font: {_FONT_PATH_REGULAR}")
 logging.info(f"Bold font: {_FONT_PATH_BOLD}")
 
 # ── Settings persistence ────────────────────────────────────────────
-SETTINGS_DIR = os.path.join(os.environ.get("LOCALAPPDATA", "."), "CisternAnalytics")
-SETTINGS_FILE = os.path.join(SETTINGS_DIR, "settings.json")
+SETTINGS_FILE = CONFIG_DIR / "settings.json"
 
 DEFAULT_CONN = {"port": "COM8", "baud": 115200, "io_port": "Port 1", "poll_ms": 50}
+DEFAULT_LINE_COLORS = {
+    "sensor": [137, 180, 250, 255],   # blue
+    "mwl":    [100, 200, 255, 255],   # light blue
+    "menis":  [180, 130, 255, 255],   # purple
+    "wd":     [243, 139, 168, 255],   # pink/red
+    "cwl":    [250, 179,  90, 255],   # orange
+}
 DEFAULT_APP = {
     "avg_window": 0.5, "cwl_mode": "Automatic", "cwl_drop_thresh": 1.5,
     "cwl_smooth": "SMA-5", "ui_refresh_ms": 50, "chart_refresh_ms": 100,
     "pressure_unit": "bar",
-    "ui_theme": "Dark"
+    "ui_theme": "Dark",
+    "line_colors": {k: list(v) for k, v in DEFAULT_LINE_COLORS.items()},
 }
 
 def load_settings():
     try:
-        if os.path.exists(SETTINGS_FILE):
+        if SETTINGS_FILE.exists():
             with open(SETTINGS_FILE) as f:
                 d = json.load(f)
                 return d.get("conn", dict(DEFAULT_CONN)), d.get("app", dict(DEFAULT_APP))
@@ -87,7 +107,7 @@ def load_settings():
 
 def save_settings(conn, app):
     try:
-        os.makedirs(SETTINGS_DIR, exist_ok=True)
+        CONFIG_DIR.mkdir(exist_ok=True)
         with open(SETTINGS_FILE, "w") as f:
             json.dump({"conn": conn, "app": app}, f, indent=2)
     except Exception:
@@ -466,33 +486,76 @@ def _manual_cwl():
         app.cwl_state = "WAITING"
         app.cwl_timer = time.time()
 
+def _refresh_flush_table():
+    """Rebuild the flush results table inside flush_table_area."""
+    if not dpg.does_item_exist("flush_table_area"):
+        return
+    dpg.delete_item("flush_table_area", children_only=True)
+
+    results = app.flush_results
+    if not results:
+        dpg.add_text("No measurements yet.", parent="flush_table_area", color=COL_GRAY)
+        return
+
+    # Header row
+    with dpg.table(parent="flush_table_area", header_row=True,
+                   borders_innerH=True, borders_outerH=True,
+                   borders_innerV=True, borders_outerV=True,
+                   row_background=True, resizable=False,
+                   scrollY=True, freeze_rows=1, height=120):
+        dpg.add_table_column(label="#",    width_fixed=True, init_width_or_weight=22)
+        dpg.add_table_column(label="Type", width_fixed=True, init_width_or_weight=42)
+        dpg.add_table_column(label="Vol",  width_fixed=True, init_width_or_weight=52)
+        dpg.add_table_column(label="Time", width_fixed=True, init_width_or_weight=48)
+        dpg.add_table_column(label="L/s",  width_fixed=True, init_width_or_weight=44)
+        dpg.add_table_column(label="Del",  width_fixed=True, init_width_or_weight=30)
+
+        for i, r in enumerate(results):
+            rate = r["vol"] / r["time"] if r["time"] > 0 else 0
+            type_col = COL_ACCENT if r["type"] == "Full" else COL_ORANGE
+            with dpg.table_row():
+                dpg.add_text(str(i + 1))
+                dpg.add_text(r["type"], color=type_col)
+                dpg.add_text(f"{r['vol']:.2f}L")
+                dpg.add_text(f"{r['time']:.1f}s")
+                dpg.add_text(f"{rate:.2f}")
+                dpg.add_button(label="X", width=24,
+                               user_data=i, callback=_delete_flush_row)
+
+    # Summary
+    n = len(results)
+    avg_v = sum(r["vol"] for r in results) / n
+    avg_t = sum(r["time"] for r in results) / n
+    dpg.add_text(f"avg {avg_v:.2f} L / {avg_t:.1f} s  ({n} runs)",
+                 parent="flush_table_area", color=COL_GRAY)
+
+def _delete_flush_row(sender, app_data, user_data):
+    idx = user_data
+    if 0 <= idx < len(app.flush_results):
+        app.flush_results.pop(idx)
+        _refresh_flush_table()
+
 def _toggle_flush_measure():
-    """Start/stop flush volume measurement (EN 14055 clause 6 - flush volume)."""
+    """Start/stop flush volume measurement (EN 14055 clause 6)."""
     if not app.flush_measuring:
         app.flush_measuring = True
         app.flush_start_vol = app.current_volume
         app.flush_start_time = time.time()
         dpg.set_item_label("btn_flush", "Stop Flush Measurement")
         dpg.bind_item_theme("btn_flush", "theme_btn_danger")
-        dpg.set_value("lbl_flush", "Flush: measuring...")
-        dpg.bind_item_theme("lbl_flush", "theme_orange")
     else:
         app.flush_measuring = False
         elapsed = time.time() - app.flush_start_time
         delta_vol = abs(app.flush_start_vol - app.current_volume)
-        app.flush_results.append({"vol": delta_vol, "time": elapsed})
+        flush_type = dpg.get_value("combo_flush_type") if dpg.does_item_exist("combo_flush_type") else "Full"
+        app.flush_results.append({"type": flush_type, "vol": delta_vol, "time": elapsed})
         dpg.set_item_label("btn_flush", "Start Flush Measurement")
         dpg.bind_item_theme("btn_flush", "theme_btn_success")
-        n = len(app.flush_results)
-        avg_vol = sum(r["vol"] for r in app.flush_results) / n
-        avg_time = sum(r["time"] for r in app.flush_results) / n
-        dpg.set_value("lbl_flush", f"Flush #{n}: {delta_vol:.2f}L / {elapsed:.1f}s (avg: {avg_vol:.2f}L)")
-        dpg.bind_item_theme("lbl_flush", "theme_green")
+        _refresh_flush_table()
 
 def _clear_flush():
     app.flush_results.clear()
-    dpg.set_value("lbl_flush", "Flush: no data")
-    dpg.bind_item_theme("lbl_flush", "theme_gray")
+    _refresh_flush_table()
 
 def _check_compliance():
     """Run EN 14055 compliance checks and show results."""
@@ -571,8 +634,9 @@ def _refresh_limits():
 
 def _toggle_log():
     if not app.is_logging:
+        EXPORT_DIR.mkdir(exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        fn = f"{app.profile.name.replace(' ', '_')}_{ts}.csv"
+        fn = str(EXPORT_DIR / f"{app.profile.name.replace(' ', '_')}_{ts}.csv")
         try:
             app.csv_file = open(fn, "w", newline="")
             app.csv_writer = csv.writer(app.csv_file)
@@ -685,10 +749,11 @@ def _plot_clicked(sender, app_data):
 
 # ── Dialogs ─────────────────────────────────────────────────────────
 def _export_screenshot():
-    """Save a PNG of the entire viewport next to the script."""
+    """Save a PNG of the entire viewport to the exports folder."""
+    EXPORT_DIR.mkdir(exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_name = app.profile.name.replace(" ", "_")
-    filename = str(_SCRIPT_DIR / f"{safe_name}_{ts}.png")
+    filename = str(EXPORT_DIR / f"{safe_name}_{ts}.png")
     try:
         dpg.output_frame_buffer(filename)
         dpg.set_value("lbl_delta", f"Saved: {Path(filename).name}")
@@ -922,6 +987,58 @@ def _save_prog():
     save_settings(app.conn_params, app.app_settings)
     _refresh_limits()
     dpg.delete_item("dlg_prog")
+
+# ── Line colors dialog ──────────────────────────────────────────────
+_LINE_COLOR_LABELS = {
+    "sensor": "Sensor line",
+    "mwl":    "MWL",
+    "menis":  "Meniscus corr.",
+    "wd":     "Water Discharge",
+    "cwl":    "CWL",
+}
+
+def _open_line_colors_dlg():
+    if dpg.does_item_exist("dlg_lc"):
+        dpg.delete_item("dlg_lc")
+    lc = app.app_settings.get("line_colors", {})
+
+    with dpg.window(label="Chart Line Colors", modal=True, tag="dlg_lc",
+                    width=340, height=320, no_resize=True, pos=[430, 200]):
+        dpg.add_text("Click a swatch to change color.", color=COL_GRAY)
+        dpg.add_spacer(height=6)
+
+        for key, label in _LINE_COLOR_LABELS.items():
+            col = lc.get(key, DEFAULT_LINE_COLORS[key])
+            with dpg.group(horizontal=True):
+                dpg.add_text(f"{label}:", color=COL_GRAY)
+                dpg.add_spacer(width=max(0, 115 - len(label) * 7))
+                dpg.add_color_edit(default_value=col, tag=f"lc_{key}",
+                                   no_inputs=False, alpha_bar=False,
+                                   display_rgb=True, width=200)
+
+        dpg.add_spacer(height=10)
+        dpg.add_separator()
+        dpg.add_spacer(height=6)
+        with dpg.group(horizontal=True):
+            dpg.add_button(label="Apply & Save", width=140, callback=_save_line_colors)
+            dpg.add_button(label="Reset Defaults", width=110, callback=_reset_line_colors)
+            dpg.add_button(label="Cancel", width=60,
+                           callback=lambda: dpg.delete_item("dlg_lc"))
+
+def _save_line_colors():
+    lc = app.app_settings.setdefault("line_colors", {})
+    for key in _LINE_COLOR_LABELS:
+        if dpg.does_item_exist(f"lc_{key}"):
+            col = list(dpg.get_value(f"lc_{key}"))[:4]
+            lc[key] = [int(c) for c in col]
+            dpg.set_value(_line_color_dpg_ids[key], lc[key])
+    save_settings(app.conn_params, app.app_settings)
+    dpg.delete_item("dlg_lc")
+
+def _reset_line_colors():
+    for key, col in DEFAULT_LINE_COLORS.items():
+        if dpg.does_item_exist(f"lc_{key}"):
+            dpg.set_value(f"lc_{key}", col)
 
 # ── File I/O ────────────────────────────────────────────────────────
 def _load_profile_cb(sender, app_data):
@@ -1256,6 +1373,7 @@ with dpg.window(tag="main_win"):
             dpg.add_menu_item(label="Hardware Connection...", callback=_open_connection_dlg)
             dpg.add_menu_item(label="Edit Calibration Profile...", callback=_open_calibration_dlg)
             dpg.add_menu_item(label="Program Settings...", callback=_open_program_dlg)
+            dpg.add_menu_item(label="Chart Line Colors...", callback=_open_line_colors_dlg)
         with dpg.menu(label="Test"):
             dpg.add_menu_item(label="EN 14055 Compliance Check", callback=_check_compliance)
 
@@ -1358,14 +1476,26 @@ with dpg.window(tag="main_win"):
             dpg.add_separator()
             dpg.add_spacer(height=2)
 
+            with dpg.group(horizontal=True):
+                dpg.add_text("Type:", color=COL_GRAY)
+                dpg.add_combo(["Full Flush", "Part Flush"],
+                              default_value="Full Flush",
+                              tag="combo_flush_type", width=-1)
+
+            dpg.add_spacer(height=3)
             dpg.add_button(label="Start Flush Measurement", tag="btn_flush",
                            callback=_toggle_flush_measure, width=-1)
             dpg.bind_item_theme("btn_flush", "theme_btn_success")
 
-            dpg.add_text("Flush: no data", tag="lbl_flush", color=COL_GRAY)
+            dpg.add_spacer(height=4)
+            # Dynamic table — rebuilt after each measurement
+            with dpg.child_window(tag="flush_table_area", height=130,
+                                  border=False, no_scrollbar=False):
+                dpg.add_text("No measurements yet.", color=COL_GRAY)
 
+            dpg.add_spacer(height=3)
             with dpg.group(horizontal=True):
-                dpg.add_button(label="Clear Flush Data", callback=_clear_flush, width=160)
+                dpg.add_button(label="Clear All", callback=_clear_flush, width=90)
                 dpg.bind_item_theme(dpg.last_item(), "theme_btn_danger")
                 dpg.add_button(label="Compliance Check", callback=_check_compliance, width=-1)
 
@@ -1441,34 +1571,46 @@ with dpg.window(tag="main_win"):
                                         color=(166, 227, 161, 240),
                                         tag="annot_click2", show=False)
 
-# Style the chart lines
+# Style the chart lines — store color item IDs for live recoloring
+_lc = app.app_settings.get("line_colors", {})
+
+def _lc_get(key):
+    return _lc.get(key, DEFAULT_LINE_COLORS[key])
+
+_line_color_dpg_ids: dict[str, int] = {}
+
 with dpg.theme(tag="theme_line_main"):
     with dpg.theme_component(dpg.mvLineSeries):
-        dpg.add_theme_color(dpg.mvPlotCol_Line, COL_ACCENT)
+        _line_color_dpg_ids["sensor"] = dpg.add_theme_color(
+            dpg.mvPlotCol_Line, _lc_get("sensor"))
         dpg.add_theme_style(dpg.mvPlotStyleVar_LineWeight, 2.0)
 dpg.bind_item_theme("line_main", "theme_line_main")
 
 with dpg.theme(tag="theme_line_mwl"):
     with dpg.theme_component(dpg.mvLineSeries):
-        dpg.add_theme_color(dpg.mvPlotCol_Line, (100, 200, 255))   # distinct light-blue, not same as sensor
+        _line_color_dpg_ids["mwl"] = dpg.add_theme_color(
+            dpg.mvPlotCol_Line, _lc_get("mwl"))
         dpg.add_theme_style(dpg.mvPlotStyleVar_LineWeight, 1.5)
 dpg.bind_item_theme("line_mwl", "theme_line_mwl")
 
 with dpg.theme(tag="theme_line_menis"):
     with dpg.theme_component(dpg.mvLineSeries):
-        dpg.add_theme_color(dpg.mvPlotCol_Line, (180, 130, 255))
+        _line_color_dpg_ids["menis"] = dpg.add_theme_color(
+            dpg.mvPlotCol_Line, _lc_get("menis"))
         dpg.add_theme_style(dpg.mvPlotStyleVar_LineWeight, 1.5)
 dpg.bind_item_theme("line_menis", "theme_line_menis")
 
 with dpg.theme(tag="theme_line_wd"):
     with dpg.theme_component(dpg.mvLineSeries):
-        dpg.add_theme_color(dpg.mvPlotCol_Line, COL_RED)
+        _line_color_dpg_ids["wd"] = dpg.add_theme_color(
+            dpg.mvPlotCol_Line, _lc_get("wd"))
         dpg.add_theme_style(dpg.mvPlotStyleVar_LineWeight, 1.5)
 dpg.bind_item_theme("line_wd", "theme_line_wd")
 
 with dpg.theme(tag="theme_line_cwl"):
     with dpg.theme_component(dpg.mvLineSeries):
-        dpg.add_theme_color(dpg.mvPlotCol_Line, COL_ORANGE)
+        _line_color_dpg_ids["cwl"] = dpg.add_theme_color(
+            dpg.mvPlotCol_Line, _lc_get("cwl"))
         dpg.add_theme_style(dpg.mvPlotStyleVar_LineWeight, 1.5)
 dpg.bind_item_theme("line_cwl", "theme_line_cwl")
 
