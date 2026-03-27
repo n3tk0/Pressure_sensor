@@ -570,6 +570,7 @@ class SensorApp:
             remaining = 2.0 - elapsed
             if remaining <= 0:
                 self.profile.cwl = self.get_avg_height()
+                self.profile.mwl_fault = self.cwl_auto_peak  # peak while armed = MWL
                 self.cwl_auto_state = "DONE"
                 return True
 
@@ -633,15 +634,6 @@ def _set_mwl():
     app.cwl_peak = val
     _refresh_limits()
 
-def _set_mwl_fault():
-    """Capture MWL — Maximum Water Level during inlet valve fault (continuous supply).
-    EN 14055 §3.11/§5.2.4a: MWL − OF ≤ 20 mm.
-    Procedure: force inlet valve open, let level stabilise while overflowing, capture."""
-    if app.profile.overflow <= 0:
-        _show_toast("⚠ Set Overflow level in Calibration first!")
-        return
-    app.profile.mwl_fault = app.get_avg_height()
-    _refresh_limits()
 
 def _arm_cwl_auto():
     """Arm automatic CWL detection (EN 14055 §5.3.4).
@@ -668,15 +660,6 @@ def _set_cwl():
     app.profile.cwl = app.get_avg_height()
     _refresh_limits()
 
-def _set_cwl_to_of():
-    """Set CWL = Overflow level (minimum compliant case for Type AG).
-    CWL − OF = 0 mm which satisfies the ≤ 10 mm requirement."""
-    if app.profile.overflow <= 0:
-        _show_toast("⚠ Set Overflow level in Calibration first!")
-        return
-    app.profile.cwl = app.profile.overflow
-    _refresh_limits()
-    _show_toast("CWL set to Overflow level")
 
 def _set_meniscus():
     """Capture meniscus — surface tension level during overflow, just above OF.
@@ -2005,15 +1988,25 @@ with dpg.window(tag="main_win"):
         # ── Left panel ───────────────────────────────────────────────
         with dpg.child_window(width=340, border=False, tag="left_panel"):
 
-            # Section: Real-Time Data
+            # Section: Real-Time Data (two-column layout)
             dpg.add_text("  LIVE DATA", color=COL_ACCENT, tag="hdr_live")
             dpg.add_separator()
             dpg.add_spacer(height=2)
-            dpg.add_text("0.0 mm",     tag="lbl_h", color=COL_ACCENT)
-            dpg.add_text("0.00 L",     tag="lbl_v", color=COL_GREEN)
-            dpg.add_text("0.0000 bar", tag="lbl_p", color=COL_GRAY)
-            dpg.add_text("0.000 L/s",  tag="lbl_f", color=COL_ORANGE)
-            dpg.add_text(_TEMP_PLACEHOLDER, tag="lbl_temp", color=COL_GRAY)
+            with dpg.group(horizontal=True):
+                # Left column: primary measurements
+                with dpg.group():
+                    dpg.add_text("0.0 mm",     tag="lbl_h", color=COL_ACCENT)
+                    dpg.add_text("0.00 L",     tag="lbl_v", color=COL_GREEN)
+                    dpg.add_text("0.0000 bar", tag="lbl_p", color=COL_GRAY)
+                dpg.add_spacer(width=12)
+                # Right column: temperature + instantaneous flow
+                with dpg.group():
+                    dpg.add_text(_TEMP_PLACEHOLDER, tag="lbl_temp", color=COL_GRAY)
+                    dpg.add_text("0.000 L/s",      tag="lbl_f",    color=COL_ORANGE)
+                    with dpg.tooltip("lbl_f"):
+                        dpg.add_text("Instantaneous flow rate (live).\n"
+                                     "EN 14055 effective rate (skip first 1 L,\n"
+                                     "last 2 L) is shown in the Flush table.")
 
             dpg.add_spacer(height=8)
 
@@ -2032,18 +2025,12 @@ with dpg.window(tag="main_win"):
                            tag="btn_menis", callback=_set_meniscus, width=-1)
             dpg.bind_item_theme("btn_menis", "theme_btn_action")
 
-            # MWL fault capture (§5.2.4a — overflow fault test max level)
-            dpg.add_button(label="Set MWL (stable fault level above OF)", callback=_set_mwl_fault, width=-1)
-            dpg.bind_item_theme(dpg.last_item(), "theme_btn_action")
-
-            # CWL auto-detect (§5.2.4b) — arm while water is at MWL,
-            # auto-finds cutoff in history and captures 2s later
+            # CWL auto-detect (§5.2.4b) — arm while water is at MWL (supply running, OF overflowing).
+            # Auto-finds cutoff in history, captures CWL 2s later, and saves MWL from peak.
             dpg.add_button(label="Arm CWL Auto-detect", callback=_arm_cwl_auto, width=-1)
             dpg.bind_item_theme(dpg.last_item(), "theme_btn_action")
             # Manual fallback — press exactly 2s after cutting supply
             dpg.add_button(label="Set CWL (manual, 2s after cutoff)", callback=_set_cwl, width=-1)
-            dpg.bind_item_theme(dpg.last_item(), "theme_btn_action")
-            dpg.add_button(label="CWL = Overflow", callback=_set_cwl_to_of, width=-1)
             dpg.bind_item_theme(dpg.last_item(), "theme_btn_action")
 
             # Manual RWL timer — only shown in Manual mode
