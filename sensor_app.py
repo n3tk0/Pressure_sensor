@@ -241,6 +241,13 @@ class SensorApp:
             self.app_settings.setdefault(k, v)
 
         self.profile = CisternProfile()
+        _default = CONFIG_DIR / "default_profile.json"
+        if _default.exists():
+            try:
+                with open(_default) as _f:
+                    self.profile.from_dict(json.load(_f))
+            except Exception:
+                pass
         self.serial_conn = None
         self.is_connected = False
         self.is_logging = False
@@ -924,9 +931,85 @@ def _open_calibration_dlg():
             dpg.add_button(label="Cancel Edit", width=100, callback=cancel_edit)
 
         dpg.add_separator()
+
+        # Export / Import calibration points
+        dpg.add_text("Export / Import points:", color=COL_GRAY)
+        with dpg.group(horizontal=True):
+            dpg.add_button(label="Export Points (.json)", width=160,
+                           callback=lambda: _cal_export_json(clone))
+            dpg.add_button(label="Import...", width=100,
+                           callback=lambda: _cal_import(clone, refresh_table))
+
+        dpg.add_separator()
         with dpg.group(horizontal=True):
             dpg.add_button(label="Save Profile", width=140, callback=save_cal)
-            dpg.add_button(label="Cancel", width=140, callback=lambda: dpg.delete_item("dlg_cal"))
+            dpg.add_button(label="Cancel", width=140,
+                           callback=lambda: dpg.delete_item("dlg_cal"))
+
+# ── Calibration points export / import ──────────────────────────────
+def _cal_export_json(profile_clone):
+    """Export calibration points as JSON to exports folder."""
+    EXPORT_DIR.mkdir(exist_ok=True)
+    safe = profile_clone.name.replace(" ", "_")
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    fp = EXPORT_DIR / f"{safe}_cal_points_{ts}.json"
+    try:
+        with open(fp, "w") as f:
+            json.dump({"name": profile_clone.name, "points": profile_clone.points}, f, indent=4)
+        _show_toast(f"Exported: {fp.name}")
+    except OSError as e:
+        logging.error(f"Cal JSON export failed: {e}")
+
+# Shared mutable holder so the file-dialog callback can reach the clone + refresh fn
+_cal_import_ctx: dict = {}
+
+def _cal_import(profile_clone, refresh_fn):
+    """Open file dialog to import calibration points (JSON)."""
+    _cal_import_ctx["clone"] = profile_clone
+    _cal_import_ctx["refresh"] = refresh_fn
+    if dpg.does_item_exist("fd_cal_import"):
+        dpg.delete_item("fd_cal_import")
+    with dpg.file_dialog(label="Import Calibration Points",
+                          callback=_cal_import_cb,
+                          tag="fd_cal_import", width=620, height=420):
+        dpg.add_file_extension(".json", color=(137, 180, 250))
+
+def _cal_import_cb(sender, app_data):
+    fp = app_data.get("file_path_name", "")
+    if not fp:
+        return
+    clone   = _cal_import_ctx.get("clone")
+    refresh = _cal_import_ctx.get("refresh")
+    if clone is None:
+        return
+    try:
+        fp = Path(fp)
+        new_pts = []
+        if fp.suffix.lower() == ".csv":
+            with open(fp, newline="") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    new_pts.append({
+                        "p": float(row.get("P_bar", row.get("p", 0))),
+                        "h": float(row.get("H_mm",  row.get("h", 0))),
+                        "v": float(row.get("Vol_L",  row.get("v", 0))),
+                    })
+        else:  # JSON
+            with open(fp) as f:
+                data = json.load(f)
+            raw = data if isinstance(data, list) else data.get("points", [])
+            for row in raw:
+                new_pts.append({
+                    "p": float(row.get("p", 0)),
+                    "h": float(row.get("h", 0)),
+                    "v": float(row.get("v", 0)),
+                })
+        clone.points = new_pts
+        if refresh:
+            refresh()
+        _show_toast(f"Imported {len(new_pts)} points from {fp.name}")
+    except Exception as e:
+        logging.error(f"Cal import failed: {e}")
 
 def _open_program_dlg():
     if dpg.does_item_exist("dlg_prog"):
@@ -961,8 +1044,12 @@ def _open_program_dlg():
                        default_value=str(s.get("chart_refresh_ms", 100)), tag="dlg_p_ch_ref", width=-1)
         dpg.add_separator()
         with dpg.group(horizontal=True):
-            dpg.add_button(label="Save", width=120, callback=_save_prog)
-            dpg.add_button(label="Cancel", width=120, callback=lambda: dpg.delete_item("dlg_prog"))
+            dpg.add_button(label="Save", width=110, callback=_save_prog)
+            dpg.add_button(label="Cancel", width=100,
+                           callback=lambda: dpg.delete_item("dlg_prog"))
+            dpg.add_button(label="Reset to Defaults", width=140,
+                           callback=lambda: (_reset_app_settings(),
+                                             dpg.delete_item("dlg_prog")))
 
 def _save_prog():
     s = app.app_settings
@@ -1076,6 +1163,40 @@ def _save_profile():
                           tag="fd_save", width=600, height=400,
                           default_filename=f"{app.profile.name}.json"):
         dpg.add_file_extension(".json", color=(0, 255, 0))
+
+def _save_as_default_profile():
+    """Save current profile to config/default_profile.json — loaded automatically on startup."""
+    CONFIG_DIR.mkdir(exist_ok=True)
+    fp = CONFIG_DIR / "default_profile.json"
+    try:
+        with open(fp, "w") as f:
+            json.dump(app.profile.to_dict(), f, indent=4)
+        _show_toast(f"Default profile set: {app.profile.name}")
+    except OSError as e:
+        logging.error(f"Failed to save default profile: {e}")
+
+def _clear_default_profile():
+    fp = CONFIG_DIR / "default_profile.json"
+    if fp.exists():
+        fp.unlink()
+    _show_toast("Default profile cleared.")
+
+def _reset_app_settings():
+    """Reset all program settings to factory defaults and save."""
+    for k, v in DEFAULT_APP.items():
+        app.app_settings[k] = v if not isinstance(v, dict) else dict(v)
+    # Re-apply colors and theme
+    for key, col in DEFAULT_LINE_COLORS.items():
+        if key in _line_color_dpg_ids:
+            dpg.set_value(_line_color_dpg_ids[key], col)
+    _apply_theme("Dark")
+    save_settings(app.conn_params, app.app_settings)
+    _refresh_limits()
+    _show_toast("Settings reset to defaults.")
+
+def _show_toast(msg: str):
+    """Briefly display a message in the delta label."""
+    dpg.set_value("lbl_delta", msg)
 
 # ── Main loop callbacks ────────────────────────────────────────────
 def update_ui():
@@ -1367,6 +1488,9 @@ with dpg.window(tag="main_win"):
         with dpg.menu(label="File"):
             dpg.add_menu_item(label="Load Profile...", callback=_load_profile)
             dpg.add_menu_item(label="Save Profile As...", callback=_save_profile)
+            dpg.add_separator()
+            dpg.add_menu_item(label="Set as Default Profile", callback=_save_as_default_profile)
+            dpg.add_menu_item(label="Clear Default Profile", callback=_clear_default_profile)
             dpg.add_separator()
             dpg.add_menu_item(label="Exit", callback=lambda: dpg.stop_dearpygui())
         with dpg.menu(label="Settings"):
