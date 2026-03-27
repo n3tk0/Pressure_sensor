@@ -1343,7 +1343,7 @@ def _open_line_colors_dlg():
                 dpg.add_spacer(width=max(0, 115 - len(label) * 7))
                 dpg.add_color_edit(default_value=col, tag=f"lc_{key}",
                                    no_inputs=False, alpha_bar=False,
-                                   display_rgb=True, width=200)
+                                   display_type=dpg.mvColorEdit_rgb, width=200)
 
         dpg.add_spacer(height=10)
         dpg.add_separator()
