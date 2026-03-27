@@ -256,6 +256,7 @@ class SensorApp:
         self.click_points = []
         self.last_t = []
         self.last_y = []
+        self.chart_paused = False
         self._last_ui_tick = 0
         self._last_chart_tick = 0
 
@@ -426,15 +427,20 @@ def _toggle_connect():
     if app.is_connected:
         app.disconnect()
         dpg.set_item_label("btn_connect", "Connect Sensor")
-        dpg.configure_item("lbl_conn", default_value="Disconnected")
+        dpg.configure_item("lbl_conn",      default_value="Disconnected")
+        dpg.configure_item("lbl_conn_icon", default_value="●", color=COL_GRAY)
+        dpg.bind_item_theme("btn_connect", 0)  # reset to default theme
     else:
         app.last_error = ""
         app.connect()
         if app.is_connected:
             dpg.set_item_label("btn_connect", "Disconnect")
-            dpg.configure_item("lbl_conn", default_value=f"Connected ({app.conn_params['port']})")
+            dpg.configure_item("lbl_conn",      default_value=f"{app.conn_params['port']}  {app.conn_params['baud']}bd")
+            dpg.configure_item("lbl_conn_icon", default_value="●", color=COL_GREEN)
+            dpg.bind_item_theme("btn_connect", "theme_btn_danger")
         elif app.last_error:
-            dpg.configure_item("lbl_conn", default_value=app.last_error)
+            dpg.configure_item("lbl_conn",      default_value=app.last_error)
+            dpg.configure_item("lbl_conn_icon", default_value="●", color=COL_RED)
             dpg.bind_item_theme("lbl_conn", "theme_red")
 
 def _set_mwl():
@@ -445,7 +451,14 @@ def _set_mwl():
     _refresh_limits()
 
 def _set_meniscus():
-    app.profile.meniscus = app.get_avg_height()
+    """Meniscus correction = Overflow height − measured water level at meniscus (EN 14055)."""
+    if app.profile.overflow <= 0:
+        # Show a non-blocking warning in the status label temporarily
+        dpg.set_value("lbl_cwl_st", "⚠ Set Overflow in Calibration first!")
+        dpg.bind_item_theme("lbl_cwl_st", "theme_orange")
+        return
+    measured_level = app.get_avg_height()
+    app.profile.meniscus = app.profile.overflow - measured_level
     _refresh_limits()
 
 def _manual_cwl():
@@ -460,6 +473,7 @@ def _toggle_flush_measure():
         app.flush_start_vol = app.current_volume
         app.flush_start_time = time.time()
         dpg.set_item_label("btn_flush", "Stop Flush Measurement")
+        dpg.bind_item_theme("btn_flush", "theme_btn_danger")
         dpg.set_value("lbl_flush", "Flush: measuring...")
         dpg.bind_item_theme("lbl_flush", "theme_orange")
     else:
@@ -467,7 +481,8 @@ def _toggle_flush_measure():
         elapsed = time.time() - app.flush_start_time
         delta_vol = abs(app.flush_start_vol - app.current_volume)
         app.flush_results.append({"vol": delta_vol, "time": elapsed})
-        dpg.set_item_label("btn_flush", "Measure Flush Volume")
+        dpg.set_item_label("btn_flush", "Start Flush Measurement")
+        dpg.bind_item_theme("btn_flush", "theme_btn_success")
         n = len(app.flush_results)
         avg_vol = sum(r["vol"] for r in app.flush_results) / n
         avg_time = sum(r["time"] for r in app.flush_results) / n
@@ -528,11 +543,12 @@ def _check_compliance():
 
 def _refresh_limits():
     p = app.profile
-    dpg.set_value("lbl_mwl", f"MWL: {p.mwl:.1f} mm")
-    dpg.set_value("lbl_menis", f"Meniscus: {p.meniscus:.1f} mm")
-    dpg.set_value("lbl_cwl", f"CWL: {p.cwl:.1f} mm")
-    dpg.set_value("lbl_wd", f"Water Disch.: {p.water_discharge:.1f} mm")
-    dpg.set_value("lbl_profile", f"Active Profile: {p.name}")
+    dpg.set_value("lbl_mwl",      f"{p.mwl:.1f} mm")
+    dpg.set_value("lbl_menis",    f"{p.meniscus:.1f} mm")
+    dpg.set_value("lbl_cwl",      f"{p.cwl:.1f} mm")
+    dpg.set_value("lbl_wd",       f"{p.water_discharge:.1f} mm")
+    dpg.set_value("lbl_overflow",  f"{p.overflow:.1f} mm")
+    dpg.set_value("lbl_profile",  f"Active Profile: {p.name}")
 
     w = app.app_settings.get("avg_window", 0.5)
     dpg.set_item_label("btn_mwl", f"Set MWL (Avg {w}s)")
@@ -564,14 +580,44 @@ def _toggle_log():
             app.csv_writer.writerow(["Timestamp", f"P({_pu})", "H(mm)", "V(L)", "F(L/s)"])
             app.is_logging = True
             dpg.set_item_label("btn_log", "Stop Data Log")
+            dpg.bind_item_theme("btn_log", "theme_btn_danger")
         except Exception:
             pass
     else:
         app.is_logging = False
         dpg.set_item_label("btn_log", "Start Data Log (CSV)")
+        dpg.bind_item_theme("btn_log", "theme_btn_success")
         if app.csv_file:
             app.csv_file.close()
             app.csv_file = None
+
+def _toggle_pause():
+    app.chart_paused = not app.chart_paused
+    if app.chart_paused:
+        dpg.set_item_label("btn_pause", "Resume")
+        dpg.bind_item_theme("btn_pause", "theme_btn_success")
+        # Unlock axes so user can pan/scroll freely
+        dpg.set_axis_limits_auto("x_axis")
+        dpg.set_axis_limits_auto("y_axis")
+        # Show drag lines at current limit values (height mode only)
+        if "Height" in dpg.get_value("combo_plot"):
+            dpg.configure_item("drag_mwl", show=True,
+                               default_value=app.profile.mwl if app.profile.mwl > 0 else 0.0)
+            dpg.configure_item("drag_cwl", show=True,
+                               default_value=app.profile.cwl if app.profile.cwl > 0 else 0.0)
+    else:
+        dpg.set_item_label("btn_pause", "Pause")
+        dpg.bind_item_theme("btn_pause", 0)  # reset to default
+        dpg.configure_item("drag_mwl", show=False)
+        dpg.configure_item("drag_cwl", show=False)
+
+def _on_drag_mwl(sender, value):
+    app.profile.mwl = float(value)
+    _refresh_limits()
+
+def _on_drag_cwl(sender, value):
+    app.profile.cwl = float(value)
+    _refresh_limits()
 
 def _clear_delta():
     app.click_points.clear()
@@ -638,6 +684,17 @@ def _plot_clicked(sender, app_data):
 
 
 # ── Dialogs ─────────────────────────────────────────────────────────
+def _export_screenshot():
+    """Save a PNG of the entire viewport next to the script."""
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_name = app.profile.name.replace(" ", "_")
+    filename = str(_SCRIPT_DIR / f"{safe_name}_{ts}.png")
+    try:
+        dpg.output_frame_buffer(filename)
+        dpg.set_value("lbl_delta", f"Saved: {Path(filename).name}")
+    except Exception as e:
+        dpg.set_value("lbl_delta", f"Screenshot failed: {e}")
+
 def _open_connection_dlg():
     if dpg.does_item_exist("dlg_conn"):
         dpg.delete_item("dlg_conn")
@@ -915,8 +972,7 @@ def update_ui():
     dpg.set_value("lbl_v", f"{v:.2f} L")
     dpg.set_value("lbl_p", p_format(p))
 
-    conn_text = f"Connected ({app.conn_params['port']})" if app.is_connected else "Disconnected"
-    dpg.set_value("lbl_conn", conn_text)
+    # Connection status icon is updated on connect/disconnect events, not every frame
 
     # CWL logic
     if app.cwl_state == "ARMED":
@@ -961,14 +1017,13 @@ def update_chart():
     if not t_data or not raw_y:
         return
 
-    # Window filter FIRST to reduce smoothing workload (#3)
+    # Window filter FIRST to reduce smoothing workload
     ws = dpg.get_value("combo_win")
     secs = {"10s": 10, "30s": 30, "60s": 60, "5min": 300}.get(ws, None)
     ct = t_data[-1]
 
     if secs:
         t_min = max(0, ct - secs)
-        # Use bisect for fast windowing (#6 approach)
         start_i = bisect.bisect_left(t_data, t_min)
         t_win = t_data[start_i:]
         y_win = raw_y[start_i:]
@@ -976,36 +1031,41 @@ def update_chart():
         t_win = t_data
         y_win = raw_y
 
-    # Smooth only visible window, not entire 12000-pt buffer (#3)
     alg = dpg.get_value("combo_smth")
     y_s = smooth(y_win, alg)
 
-    # Store for tooltip/delta snap
-    app.last_t = t_win
-    app.last_y = y_s
+    # Store for tooltip/delta snap (always update — hover works even when paused)
+    app.last_t = list(t_win)
+    app.last_y = list(y_s)
 
-    t_plot = list(t_win)
-    y_plot = list(y_s)
+    # When paused: update the line data so the full buffer is visible,
+    # but do NOT force axis limits — let the user pan/scroll freely.
+    dpg.set_value("line_main", [app.last_t, app.last_y])
 
-    dpg.set_value("line_main", [t_plot, y_plot])
+    if not app.chart_paused:
+        auto_scroll = dpg.get_value("chk_autoscroll")
+        if auto_scroll and app.last_t:
+            x_min = app.last_t[0]
+            x_max = app.last_t[-1]
+            if x_max - x_min < 1:
+                x_max = x_min + 1
+            dpg.set_axis_limits("x_axis", x_min, x_max)
 
-    # Axis fit
-    if t_plot:
-        x_min = t_plot[0]
-        x_max = t_plot[-1]
-        if x_max - x_min < 1:
-            x_max = x_min + 1
-        dpg.set_axis_limits("x_axis", x_min, x_max)
+            y_min_v = min(app.last_y)
+            y_max_v = max(app.last_y)
+            margin = max((y_max_v - y_min_v) * 0.1, 0.5)
+            dpg.set_axis_limits("y_axis", y_min_v - margin, y_max_v + margin)
+        else:
+            # Auto-scroll off while live: release axes for free pan
+            dpg.set_axis_limits_auto("x_axis")
+            dpg.set_axis_limits_auto("y_axis")
 
-        y_min_v = min(y_plot)
-        y_max_v = max(y_plot)
-        margin = max((y_max_v - y_min_v) * 0.1, 0.5)
-        dpg.set_axis_limits("y_axis", y_min_v - margin, y_max_v + margin)
-
-    # Limit lines (height mode only)
+    # Limit lines (height mode only) — keep full x-span of entire buffer
     plot_mode = dpg.get_value("combo_plot")
-    if "Height" in plot_mode and t_plot:
-        x0, x1 = t_plot[0], t_plot[-1]
+    if "Height" in plot_mode and t_data:
+        x0, x1 = t_data[0], t_data[-1]
+        if x1 - x0 < 1:
+            x1 = x0 + 1
         for tag, val in [("line_mwl", app.profile.mwl), ("line_menis", app.profile.meniscus),
                          ("line_wd", app.profile.water_discharge), ("line_cwl", app.profile.cwl)]:
             if val > 0:
@@ -1161,9 +1221,31 @@ def _apply_theme(mode):
 
 dpg.bind_theme("theme_dark")
 
+# ── Themed button styles ─────────────────────────────────────────────
+# Action button (teal accent) — for measurement capture actions
+with dpg.theme(tag="theme_btn_action"):
+    with dpg.theme_component(dpg.mvButton):
+        dpg.add_theme_color(dpg.mvThemeCol_Button,        (40,  90,  90))
+        dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (55, 115, 115))
+        dpg.add_theme_color(dpg.mvThemeCol_ButtonActive,  (70, 140, 140))
+
+# Danger button (red) — for stop/clear actions
+with dpg.theme(tag="theme_btn_danger"):
+    with dpg.theme_component(dpg.mvButton):
+        dpg.add_theme_color(dpg.mvThemeCol_Button,        (100, 40,  50))
+        dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (130, 55,  65))
+        dpg.add_theme_color(dpg.mvThemeCol_ButtonActive,  (160, 70,  80))
+
+# Success button (green) — for start/log actions
+with dpg.theme(tag="theme_btn_success"):
+    with dpg.theme_component(dpg.mvButton):
+        dpg.add_theme_color(dpg.mvThemeCol_Button,        (35,  90,  55))
+        dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (50, 115,  70))
+        dpg.add_theme_color(dpg.mvThemeCol_ButtonActive,  (65, 140,  85))
+
 # Main window
 with dpg.window(tag="main_win"):
-    # Menu bar
+    # ── Menu bar ─────────────────────────────────────────────────────
     with dpg.menu_bar():
         with dpg.menu(label="File"):
             dpg.add_menu_item(label="Load Profile...", callback=_load_profile)
@@ -1177,102 +1259,187 @@ with dpg.window(tag="main_win"):
         with dpg.menu(label="Test"):
             dpg.add_menu_item(label="EN 14055 Compliance Check", callback=_check_compliance)
 
-    # Top bar
-    with dpg.group(horizontal=True):
-        dpg.add_text("Active Profile: Untitled Profile", tag="lbl_profile")
-        dpg.add_spacer(width=-1)
-        dpg.add_text("Disconnected", tag="lbl_conn", color=COL_GRAY)
-        dpg.add_button(label="Connect Sensor", tag="btn_connect", callback=_toggle_connect, width=160)
+    # ── Status bar (top) ─────────────────────────────────────────────
+    with dpg.table(header_row=False, borders_innerV=False, borders_outerH=False,
+                   borders_outerV=False, resizable=False):
+        dpg.add_table_column(init_width_or_weight=1.0)   # profile name (stretches)
+        dpg.add_table_column(width_fixed=True, init_width_or_weight=180)  # conn status
+        dpg.add_table_column(width_fixed=True, init_width_or_weight=160)  # connect btn
+        with dpg.table_row():
+            dpg.add_text("Active Profile: Untitled Profile", tag="lbl_profile")
+            with dpg.group(horizontal=True):
+                dpg.add_text("", tag="lbl_conn_icon", color=COL_GRAY)
+                dpg.add_text("Disconnected", tag="lbl_conn", color=COL_GRAY)
+            dpg.add_button(label="Connect Sensor", tag="btn_connect",
+                           callback=_toggle_connect, width=-1)
 
     dpg.add_separator()
 
-    # Main area
+    # ── Main layout ───────────────────────────────────────────────────
     with dpg.group(horizontal=True):
-        # Left panel
-        with dpg.child_window(width=310, border=True):
-            # Real-Time Data
-            dpg.add_text("Real-Time Data", color=COL_WHITE)
-            dpg.add_spacer(height=4)
-            dpg.add_text("0.0 mm", tag="lbl_h", color=COL_ACCENT)
-            dpg.add_text("0.00 L", tag="lbl_v", color=COL_GREEN)
+
+        # ── Left panel ───────────────────────────────────────────────
+        with dpg.child_window(width=295, border=False):
+
+            # Section: Real-Time Data
+            dpg.add_text("  LIVE DATA", color=COL_ACCENT)
+            dpg.add_separator()
+            dpg.add_spacer(height=2)
+            dpg.add_text("0.0 mm",     tag="lbl_h", color=COL_ACCENT)
+            dpg.add_text("0.00 L",     tag="lbl_v", color=COL_GREEN)
             dpg.add_text("0.0000 bar", tag="lbl_p", color=COL_GRAY)
 
-            dpg.add_separator()
+            dpg.add_spacer(height=10)
 
-            # EN14055 Limits
-            dpg.add_text("EN 14055 Limits", color=COL_WHITE)
-            dpg.add_spacer(height=4)
-            dpg.add_button(label=f"Set MWL (Avg {app.app_settings.get('avg_window', 0.5)}s)",
+            # Section: EN 14055 Limits — capture buttons
+            dpg.add_text("  EN 14055 LIMITS", color=COL_ACCENT)
+            dpg.add_separator()
+            dpg.add_spacer(height=2)
+
+            _avg = app.app_settings.get("avg_window", 0.5)
+            dpg.add_button(label=f"Capture MWL  (avg {_avg}s)",
                            tag="btn_mwl", callback=_set_mwl, width=-1)
+            dpg.bind_item_theme("btn_mwl", "theme_btn_action")
+
+            dpg.add_button(label="Capture Meniscus",
+                           tag="btn_menis", callback=_set_meniscus, width=-1)
+            dpg.bind_item_theme("btn_menis", "theme_btn_action")
+
+            # Manual CWL timer — only shown in Manual mode
             dpg.add_button(label="Start CWL 2s Timer", tag="btn_manual_cwl",
                            callback=_manual_cwl, width=-1, show=False)
-            dpg.add_button(label=f"Set Meniscus (Avg {app.app_settings.get('avg_window', 0.5)}s)",
-                           tag="btn_menis", callback=_set_meniscus, width=-1)
+            dpg.bind_item_theme("btn_manual_cwl", "theme_btn_action")
 
-            dpg.add_separator()
+            dpg.add_spacer(height=6)
 
-            dpg.add_text("MWL: 0.0 mm", tag="lbl_mwl")
-            dpg.add_text("Meniscus: 0.0 mm", tag="lbl_menis")
-            dpg.add_text("CWL: 0.0 mm", tag="lbl_cwl")
-            dpg.add_text("Water Disch.: 0.0 mm", tag="lbl_wd", color=COL_GRAY)
+            # Measured / captured values
+            with dpg.table(header_row=False, borders_innerV=False, borders_outerH=False,
+                           borders_outerV=False, resizable=False):
+                dpg.add_table_column(width_fixed=True, init_width_or_weight=120)
+                dpg.add_table_column(init_width_or_weight=1.0)
+
+                for lbl, tag in [
+                    ("MWL",          "lbl_mwl"),
+                    ("Meniscus corr","lbl_menis"),
+                    ("CWL",          "lbl_cwl"),
+                ]:
+                    with dpg.table_row():
+                        dpg.add_text(lbl + ":", color=COL_GRAY)
+                        dpg.add_text("0.0 mm", tag=tag)
+
+            dpg.add_spacer(height=4)
+
+            # Calibration reference values (read-only, from profile)
+            with dpg.table(header_row=False, borders_innerV=False, borders_outerH=False,
+                           borders_outerV=False, resizable=False):
+                dpg.add_table_column(width_fixed=True, init_width_or_weight=120)
+                dpg.add_table_column(init_width_or_weight=1.0)
+
+                for lbl, tag in [
+                    ("Water Disch.", "lbl_wd"),
+                    ("Overflow",     "lbl_overflow"),
+                ]:
+                    with dpg.table_row():
+                        dpg.add_text(lbl + ":", color=COL_GRAY)
+                        dpg.add_text("0.0 mm", tag=tag, color=COL_GRAY)
 
             dpg.add_spacer(height=8)
-            dpg.add_text("MARGIN: WAITING", tag="lbl_margin", color=COL_GRAY)
-            dpg.add_text("CWL Trigger: IDLE", tag="lbl_cwl_st", color=COL_GRAY)
 
-            dpg.add_spacer(height=12)
+            # Compliance status
+            dpg.add_text("MARGIN: WAITING", tag="lbl_margin")
+            dpg.bind_item_theme("lbl_margin", "theme_gray")
+            dpg.add_text("CWL: IDLE", tag="lbl_cwl_st")
+            dpg.bind_item_theme("lbl_cwl_st", "theme_gray")
+
+            dpg.add_spacer(height=10)
+
+            # Section: Flush Test
+            dpg.add_text("  FLUSH TEST  (EN 14055)", color=COL_ACCENT)
             dpg.add_separator()
-            dpg.add_text("EN 14055 Flush Test", color=COL_WHITE)
-            dpg.add_spacer(height=4)
-            dpg.add_button(label="Measure Flush Volume", tag="btn_flush",
+            dpg.add_spacer(height=2)
+
+            dpg.add_button(label="Start Flush Measurement", tag="btn_flush",
                            callback=_toggle_flush_measure, width=-1)
-            with dpg.group(horizontal=True):
-                dpg.add_text("Flush: no data", tag="lbl_flush", color=COL_GRAY)
-                dpg.add_button(label="X", width=24, callback=_clear_flush)
-            dpg.add_button(label="Run Compliance Check", tag="btn_comply",
-                           callback=_check_compliance, width=-1)
+            dpg.bind_item_theme("btn_flush", "theme_btn_success")
 
-            dpg.add_spacer(height=12)
+            dpg.add_text("Flush: no data", tag="lbl_flush", color=COL_GRAY)
+
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Clear Flush Data", callback=_clear_flush, width=160)
+                dpg.bind_item_theme(dpg.last_item(), "theme_btn_danger")
+                dpg.add_button(label="Compliance Check", callback=_check_compliance, width=-1)
+
+            dpg.add_spacer(height=10)
+
+            # Section: Data Log
+            dpg.add_text("  DATA LOG", color=COL_ACCENT)
             dpg.add_separator()
+            dpg.add_spacer(height=2)
             dpg.add_button(label="Start Data Log (CSV)", tag="btn_log",
                            callback=_toggle_log, width=-1)
+            dpg.bind_item_theme("btn_log", "theme_btn_success")
 
-        # Right panel - chart
-        with dpg.child_window(border=True):
-            # Toolbar
+        # ── Right panel — chart ──────────────────────────────────────
+        with dpg.child_window(border=False):
+
+            # Single toolbar row
             with dpg.group(horizontal=True):
                 dpg.add_text("Axis:")
                 dpg.add_combo(["Height (mm)", "Volume (L)", "Flow Rate (L/s)"],
-                              default_value="Height (mm)", tag="combo_plot", width=130)
+                              default_value="Height (mm)", tag="combo_plot", width=132)
+                dpg.add_spacer(width=4)
                 dpg.add_text("Window:")
                 dpg.add_combo(["10s", "30s", "60s", "5min", "All"],
-                              default_value="30s", tag="combo_win", width=70)
+                              default_value="30s", tag="combo_win", width=72)
+                dpg.add_spacer(width=4)
                 dpg.add_text("Smooth:")
                 dpg.add_combo(["None", "SMA-5", "SMA-20", "EMA-Fast", "EMA-Slow"],
                               default_value="None", tag="combo_smth", width=100)
-                dpg.add_text("Delta: Click 2 pts", tag="lbl_delta", color=COL_ACCENT)
-                dpg.add_button(label="Clear Delta", callback=_clear_delta)
+                dpg.add_spacer(width=8)
+                dpg.add_checkbox(label="Auto-scroll", tag="chk_autoscroll", default_value=True)
+                dpg.add_spacer(width=4)
+                dpg.add_button(label="Pause", tag="btn_pause",
+                               callback=_toggle_pause, width=78)
+                dpg.add_button(label="Screenshot", callback=_export_screenshot, width=100)
+                dpg.add_spacer(width=8)
+                dpg.add_text("Delta:", color=COL_GRAY)
+                dpg.add_text("---", tag="lbl_delta", color=COL_ACCENT)
+                dpg.add_button(label="Clear", callback=_clear_delta, width=50)
+
+            dpg.add_spacer(height=2)
 
             # Plot
             with dpg.plot(tag="main_plot", height=-1, width=-1, anti_aliased=True,
                           crosshairs=True, query=False):
-                dpg.add_plot_legend()
+                dpg.add_plot_legend(location=dpg.mvPlot_Location_NorthWest, outside=False)
                 dpg.add_plot_axis(dpg.mvXAxis, label="Time (s)", tag="x_axis")
                 with dpg.plot_axis(dpg.mvYAxis, label="Height (mm)", tag="y_axis"):
-                    dpg.add_line_series([], [], tag="line_main", label="Sensor")
-                    dpg.add_line_series([], [], tag="line_mwl", label="MWL", show=False)
-                    dpg.add_line_series([], [], tag="line_menis", label="Meniscus", show=False)
-                    dpg.add_line_series([], [], tag="line_wd", label="Water Disch.", show=False)
-                    dpg.add_line_series([], [], tag="line_cwl", label="CWL", show=False)
-                    # Click markers — two separate scatter series so each can be styled
+                    dpg.add_line_series([], [], tag="line_main",  label="Sensor")
+                    dpg.add_line_series([], [], tag="line_mwl",   label="MWL",          show=False)
+                    dpg.add_line_series([], [], tag="line_menis", label="Meniscus corr", show=False)
+                    dpg.add_line_series([], [], tag="line_wd",    label="Water Disch.",  show=False)
+                    dpg.add_line_series([], [], tag="line_cwl",   label="CWL",           show=False)
                     dpg.add_scatter_series([], [], tag="scatter_click1", label="")
                     dpg.add_scatter_series([], [], tag="scatter_click2", label="")
-                dpg.add_plot_annotation(label="", default_value=(0, 0), offset=(15, -15),
-                                         color=(205, 214, 244, 230), tag="hover_annot", show=False)
-                dpg.add_plot_annotation(label="", default_value=(0, 0), offset=(12, -30),
-                                         color=(243, 139, 168, 240), tag="annot_click1", show=False)
-                dpg.add_plot_annotation(label="", default_value=(0, 0), offset=(12, -30),
-                                         color=(166, 227, 161, 240), tag="annot_click2", show=False)
+
+                # Drag lines — shown only during pause in height mode
+                dpg.add_drag_line(label="MWL [drag]", tag="drag_mwl",
+                                  color=[100, 160, 255, 200],
+                                  default_value=0.0, vertical=False, show=False,
+                                  callback=_on_drag_mwl)
+                dpg.add_drag_line(label="CWL [drag]", tag="drag_cwl",
+                                  color=[250, 179, 90, 200],
+                                  default_value=0.0, vertical=False, show=False,
+                                  callback=_on_drag_cwl)
+                dpg.add_plot_annotation(label="", default_value=(0, 0), offset=(12, -18),
+                                        color=(205, 214, 244, 230),
+                                        tag="hover_annot", show=False)
+                dpg.add_plot_annotation(label="", default_value=(0, 0), offset=(12, -28),
+                                        color=(243, 139, 168, 240),
+                                        tag="annot_click1", show=False)
+                dpg.add_plot_annotation(label="", default_value=(0, 0), offset=(12, -28),
+                                        color=(166, 227, 161, 240),
+                                        tag="annot_click2", show=False)
 
 # Style the chart lines
 with dpg.theme(tag="theme_line_main"):
@@ -1283,7 +1450,7 @@ dpg.bind_item_theme("line_main", "theme_line_main")
 
 with dpg.theme(tag="theme_line_mwl"):
     with dpg.theme_component(dpg.mvLineSeries):
-        dpg.add_theme_color(dpg.mvPlotCol_Line, COL_ACCENT)
+        dpg.add_theme_color(dpg.mvPlotCol_Line, (100, 200, 255))   # distinct light-blue, not same as sensor
         dpg.add_theme_style(dpg.mvPlotStyleVar_LineWeight, 1.5)
 dpg.bind_item_theme("line_mwl", "theme_line_mwl")
 
