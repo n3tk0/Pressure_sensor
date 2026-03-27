@@ -14,6 +14,9 @@ on:
       - '.github/workflows/build-exe.yml'
   workflow_dispatch:   # allow manual trigger from GitHub Actions tab
 
+permissions:
+  contents: write   # needed to push the rebuilt EXE back to the branch
+
 jobs:
   build:
     runs-on: windows-latest
@@ -21,6 +24,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
@@ -65,5 +70,3 @@ jobs:
           git add output/sensor_app.exe
           git diff --staged --quiet || git commit -m "chore: rebuild sensor_app.exe [skip ci]"
           git push
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
