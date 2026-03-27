@@ -237,6 +237,11 @@ def interp_hv(p_bar, pts):
     return sp[i]["h"] + r * (sp[i+1]["h"] - sp[i]["h"]), sp[i]["v"] + r * (sp[i+1]["v"] - sp[i]["v"])
 
 # ── IFM Protocol ────────────────────────────────────────────────────
+# IFM PI1789 PDIN layout: bytes 0-3 = pressure, bytes 4-7 = temperature
+_PDIN_TEMP_OFFSET = 8    # hex-string start index of temperature word
+_PDIN_TEMP_END    = 16   # hex-string end index  (4 bytes = 8 hex chars)
+_PDIN_TEMP_SCALE  = 0.1  # °C per LSB
+_TEMP_PLACEHOLDER = "-- °C"
 def build_request(port_idx):
     payload = json.dumps({
         "code": 10, "cid": 1, "adr": "/getdatamulti",
@@ -365,9 +370,9 @@ class SensorApp:
                                     h, v = interp_hv(p_bar, self.profile.points)
                                     # Temperature from bytes 4-7 of pdin (PI1789: 0.1°C/LSB)
                                     temp_c = None
-                                    if len(hx) >= 16:
-                                        raw_t = struct.unpack(">i", bytes.fromhex(hx[8:16]))[0]
-                                        temp_c = raw_t * 0.1
+                                    if len(hx) >= _PDIN_TEMP_END:
+                                        raw_t = struct.unpack(">i", bytes.fromhex(hx[_PDIN_TEMP_OFFSET:_PDIN_TEMP_END]))[0]
+                                        temp_c = raw_t * _PDIN_TEMP_SCALE
                                     with self.data_lock:
                                         t = time.time() - self.start_time
                                         f_rate = 0.0
@@ -1588,7 +1593,7 @@ def update_ui():
     if dpg.does_item_exist("lbl_f"):
         dpg.set_value("lbl_f", f"{f:.3f} L/s")
     if dpg.does_item_exist("lbl_temp"):
-        dpg.set_value("lbl_temp", f"{temp:.1f} \u00b0C" if temp is not None else "-- \u00b0C")
+        dpg.set_value("lbl_temp", f"{temp:.1f} \u00b0C" if temp is not None else _TEMP_PLACEHOLDER)
 
     # Live headroom to overflow = OF − current height (live indicator, not EN14055 §5.2.6 "c")
     of = app.profile.overflow
@@ -2008,7 +2013,7 @@ with dpg.window(tag="main_win"):
             dpg.add_text("0.00 L",     tag="lbl_v", color=COL_GREEN)
             dpg.add_text("0.0000 bar", tag="lbl_p", color=COL_GRAY)
             dpg.add_text("0.000 L/s",  tag="lbl_f", color=COL_ORANGE)
-            dpg.add_text("-- °C",      tag="lbl_temp", color=COL_GRAY)
+            dpg.add_text(_TEMP_PLACEHOLDER, tag="lbl_temp", color=COL_GRAY)
 
             dpg.add_spacer(height=8)
 
