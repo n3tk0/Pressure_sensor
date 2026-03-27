@@ -505,12 +505,22 @@ class SensorApp:
                       h_history: list, t_history: list) -> bool:
         """Auto-detect CWL per EN 14055 §5.3.4.
 
-        While ARMED (overflow running), track the stable peak level.
-        When the smoothed level drops ≥ 1.5 mm from peak (supply cut off):
-          - Scan back through smoothed h_history + t_history to find the
-            last sample still at/above (peak − 0.5 mm) — the true cutoff.
-          - Start the 2-second EN14055 window from that moment.
-        2 s after the cutoff → capture p.cwl.
+        EN 14055 height order (top → bottom):
+          MWL (≤+20mm above OF) — fault level, water stable here during test
+          CWL (≤+10mm above OF) — 2s after supply cut-off
+          Meniscus (≤+5mm above OF) — surface tension residual
+          ── Overflow level (OF) ──
+          NWL  — set by float/inlet valve; safety margin c = OF−NWL ≥ 20mm
+          RWL  — residual after flush
+          Seat — seals/components minimum; V=0L in calibration
+
+        While ARMED, track the stable peak = MWL (water held above OF by
+        continuous fault supply).  When the smoothed level drops ≥ 1.5 mm
+        from peak (supply cut off):
+          - Scan back through h_history + t_history to find the last sample
+            still at/above (peak − 0.5 mm) — the true supply-cutoff moment.
+          - Start the 2-second EN14055 window from that exact timestamp.
+        2 s after cutoff → capture p.cwl (should be ≤ 10 mm above OF).
         Returns True when CWL is captured (caller should refresh limits).
         """
         alg = self.app_settings.get("cwl_smooth", "SMA-5")
@@ -519,7 +529,7 @@ class SensorApp:
             sm = smooth(h_history, alg)
             val = sm[-1] if sm else h
 
-            # Track peak while supply is running (level stable near OF)
+            # Track peak = MWL (level stable above OF while fault supply runs)
             if val > self.cwl_auto_peak:
                 self.cwl_auto_peak = val
 
@@ -621,17 +631,17 @@ def _set_mwl_fault():
 
 def _arm_cwl_auto():
     """Arm automatic CWL detection (EN 14055 §5.3.4).
-    Press while overflow is actively running (fault simulation).
-    The detector will watch for the supply-cutoff drop (≥1.5 mm smoothed),
-    locate the exact cutoff moment in history, and capture CWL 2 s later."""
+    Press while water is stable at MWL (fault supply running, water overflowing).
+    Detector watches for supply-cutoff (≥1.5 mm smoothed drop from MWL peak),
+    locates the exact cutoff moment in history, captures CWL 2 s after that."""
     if app.profile.overflow <= 0:
         _show_toast("⚠ Set Overflow level in Calibration first!")
         return
     app.cwl_auto_state = "ARMED"
-    app.cwl_auto_peak  = app.get_avg_height()  # seed peak with current level
+    app.cwl_auto_peak  = app.get_avg_height()  # seed peak = current MWL
     app.cwl_auto_timer = 0.0
     _refresh_limits()
-    _show_toast("CWL detector armed — cut supply now")
+    _show_toast("CWL armed — water should be at MWL. Cut supply when ready.")
 
 def _set_cwl():
     """Capture CWL manually — fallback if auto-detection is not used.
@@ -776,8 +786,14 @@ def _clear_flush():
 def _check_compliance():
     """Run EN 14055:2015 compliance checks.
 
-    EN 14055 height order (bottom → top):
-      RWL < NWL < OF < Meniscus (≤+5mm) < CWL (≤+10mm) < MWL (≤+20mm)
+    EN 14055 height order (top → bottom):
+      MWL   fault level, stable above OF during continuous supply  (≤+20mm above OF)
+      CWL   2 s after supply cut-off                               (≤+10mm above OF)
+      Meniscus  surface tension residual at overflow lip            (≤+5mm above OF)
+      ── Overflow level (OF) ──
+      NWL   normal fill line set by float/inlet valve; in calibration
+      RWL   residual after a complete flush
+      Seat  seals/components minimum; V=0L calibration point
 
     Key requirements (§5.2.4, §5.2.6, §5.2.7):
       §5.2.6  Safety margin c = OF − NWL  ≥ 20 mm
@@ -884,8 +900,14 @@ def _check_compliance():
 def _refresh_limits():
     """Refresh all EN 14055 limit labels and status indicators.
 
-    EN 14055:2015 height order (bottom → top):
-      RWL < NWL < OF < Meniscus (≤+5mm) < CWL (≤+10mm) < MWL_fault (≤+20mm)
+    EN 14055:2015 height order (top → bottom):
+      MWL        fault level, stable above OF       (≤+20mm above OF)
+      CWL        2s after supply cut-off            (≤+10mm above OF)
+      Meniscus   surface tension at overflow lip    (≤+5mm  above OF)
+      ── Overflow level (OF) ──
+      NWL        normal fill (float/inlet valve; also in calibration)
+      RWL        residual after flush
+      Seat       seals minimum; V=0L calibration point
 
     §5.2.6  Safety margin c = OF − NWL   ≥ 20 mm
     §5.2.4a MWL (fault)     − OF         ≤ 20 mm
@@ -1601,7 +1623,7 @@ def update_ui():
                           f"CWL: {app.profile.cwl:.1f}mm  ({diff:+.1f}mm OF)")
             _bind_status("lbl_cwl_auto_st", "theme_green")
         else:
-            dpg.set_value("lbl_cwl_auto_st", "CWL: IDLE — arm while overflow running")
+            dpg.set_value("lbl_cwl_auto_st", "CWL: IDLE — arm while at MWL")
             _bind_status("lbl_cwl_auto_st", "theme_gray")
 
 def update_chart():
@@ -1983,7 +2005,7 @@ with dpg.window(tag="main_win"):
             dpg.add_spacer(height=2)
 
             _avg = app.app_settings.get("avg_window", 0.5)
-            # NWL = Nominal Water Level (normal fill, §5.2.6)
+            # NWL = normal fill level set by float/inlet valve (also in calibration, §5.2.6)
             dpg.add_button(label=f"Set NWL  (avg {_avg}s)",
                            tag="btn_mwl", callback=_set_mwl, width=-1)
             dpg.bind_item_theme("btn_mwl", "theme_btn_action")
@@ -1993,11 +2015,11 @@ with dpg.window(tag="main_win"):
             dpg.bind_item_theme("btn_menis", "theme_btn_action")
 
             # MWL fault capture (§5.2.4a — overflow fault test max level)
-            dpg.add_button(label="Set MWL (fault — overflow running)", callback=_set_mwl_fault, width=-1)
+            dpg.add_button(label="Set MWL (stable fault level above OF)", callback=_set_mwl_fault, width=-1)
             dpg.bind_item_theme(dpg.last_item(), "theme_btn_action")
 
-            # CWL auto-detect (§5.2.4b) — arm while overflow is running,
-            # auto-captures 2s after the supply-cutoff drop is detected
+            # CWL auto-detect (§5.2.4b) — arm while water is at MWL,
+            # auto-finds cutoff in history and captures 2s later
             dpg.add_button(label="Arm CWL Auto-detect", callback=_arm_cwl_auto, width=-1)
             dpg.bind_item_theme(dpg.last_item(), "theme_btn_action")
             # Manual fallback — press exactly 2s after cutting supply
@@ -2048,7 +2070,7 @@ with dpg.window(tag="main_win"):
             # Status indicators
             dpg.add_text("CWL: — (capture during fault test)", tag="lbl_airgap")
             _bind_status("lbl_airgap", "theme_gray")
-            dpg.add_text("CWL: IDLE — arm while overflow running", tag="lbl_cwl_auto_st")
+            dpg.add_text("CWL: IDLE — arm while at MWL", tag="lbl_cwl_auto_st")
             _bind_status("lbl_cwl_auto_st", "theme_gray")
             dpg.add_text("RWL: IDLE (set NWL to arm)", tag="lbl_cwl_st")
             _bind_status("lbl_cwl_st", "theme_gray")
