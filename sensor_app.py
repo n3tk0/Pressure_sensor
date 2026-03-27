@@ -2081,14 +2081,19 @@ with dpg.window(tag="main_win"):
             dpg.add_spacer(height=2)
 
             _avg = app.app_settings.get("avg_window", 0.5)
-            # NWL = normal fill level set by float/inlet valve (also in calibration, §5.2.6)
-            dpg.add_button(label=f"Set NWL  (avg {_avg}s)",
-                           tag="btn_mwl", callback=_set_mwl, width=-1)
-            dpg.bind_item_theme("btn_mwl", "theme_btn_action")
-
-            dpg.add_button(label=f"Set Meniscus (avg {_avg}s)",
-                           tag="btn_menis", callback=_set_meniscus, width=-1)
-            dpg.bind_item_theme("btn_menis", "theme_btn_action")
+            # NWL + Meniscus on one row, each half-width
+            with dpg.table(header_row=False, borders_innerV=False,
+                           borders_outerV=False, borders_innerH=False,
+                           borders_outerH=False, pad_outerX=False):
+                dpg.add_table_column()
+                dpg.add_table_column()
+                with dpg.table_row():
+                    dpg.add_button(label=f"Set NWL ({_avg}s)",
+                                   tag="btn_mwl", callback=_set_mwl, width=-1)
+                    dpg.bind_item_theme("btn_mwl", "theme_btn_action")
+                    dpg.add_button(label=f"Set Meniscus ({_avg}s)",
+                                   tag="btn_menis", callback=_set_meniscus, width=-1)
+                    dpg.bind_item_theme("btn_menis", "theme_btn_action")
 
             # CWL auto-detect (§5.2.4b) — arm while water is at MWL (supply running, OF overflowing).
             # Auto-finds cutoff in history, captures CWL 2s later, and saves MWL from peak.
