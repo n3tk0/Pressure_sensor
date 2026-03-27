@@ -18,6 +18,9 @@ import os
 import math
 import bisect
 import logging
+import re
+import shutil
+import tempfile
 from pathlib import Path
 from datetime import datetime
 
@@ -98,18 +101,20 @@ DEFAULT_APP = {
 def load_settings():
     try:
         if SETTINGS_FILE.exists():
-            with open(SETTINGS_FILE) as f:
+            with open(SETTINGS_FILE, encoding="utf-8") as f:
                 d = json.load(f)
                 return d.get("conn", dict(DEFAULT_CONN)), d.get("app", dict(DEFAULT_APP))
     except Exception as e:
         logging.warning(f"Could not load settings, using defaults: {e}")
     return dict(DEFAULT_CONN), dict(DEFAULT_APP)
 
-def save_settings(conn, app):
+def save_settings(conn, app_s):
     try:
         CONFIG_DIR.mkdir(exist_ok=True)
-        with open(SETTINGS_FILE, "w") as f:
-            json.dump({"conn": conn, "app": app}, f, indent=2)
+        tmp = SETTINGS_FILE.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"conn": conn, "app": app_s}, f, indent=2)
+        shutil.move(str(tmp), str(SETTINGS_FILE))
     except Exception as e:
         logging.warning(f"Could not save settings: {e}")
 
@@ -190,22 +195,26 @@ _sorted_pts_cache = []
 _sorted_pts_pressures = []
 _interp_cache_version = 0  # bumped on every rebuild
 _interp_expected_version = -1  # checked in interp_hv
+_interp_lock = threading.Lock()
 
 def _rebuild_interp_cache(pts):
     """Pre-sort calibration points once. Call on profile load/save/edit."""
     global _sorted_pts_cache, _sorted_pts_pressures, _interp_cache_version
-    _sorted_pts_cache = sorted(pts, key=lambda x: x["p"])
-    _sorted_pts_pressures = [pt["p"] for pt in _sorted_pts_cache]
-    _interp_cache_version += 1
+    with _interp_lock:
+        _sorted_pts_cache = sorted(pts, key=lambda x: x["p"])
+        _sorted_pts_pressures = [pt["p"] for pt in _sorted_pts_cache]
+        _interp_cache_version += 1
 
 def interp_hv(p_bar, pts):
     global _interp_expected_version
     if not pts:
         return 0.0, 0.0
     # Rebuild cache if stale (e.g. profile changed between calls)
-    if _interp_expected_version != _interp_cache_version:
-        _rebuild_interp_cache(pts)
-        _interp_expected_version = _interp_cache_version
+    with _interp_lock:
+        if _interp_expected_version != _interp_cache_version:
+            _sorted_pts_cache[:] = sorted(pts, key=lambda x: x["p"])
+            _sorted_pts_pressures[:] = [pt["p"] for pt in _sorted_pts_cache]
+            _interp_expected_version = _interp_cache_version
     sp = _sorted_pts_cache
     if len(sp) == 1:
         return sp[0]["h"], sp[0]["v"]
@@ -255,6 +264,7 @@ class SensorApp:
         self.csv_file = None
         self.csv_writer = None
         self._csv_row_count = 0
+        self._csv_lock = threading.Lock()
 
         self.last_error = ""
         self.stop_event = threading.Event()
@@ -271,6 +281,7 @@ class SensorApp:
         self.current_pressure = 0.0
         self.current_height = 0.0
         self.current_volume = 0.0
+        self.current_flow = 0.0
 
         self.cwl_state = "IDLE"
         self.cwl_peak = 0.0
@@ -279,8 +290,15 @@ class SensorApp:
         # EN 14055 flush volume measurement
         self.flush_measuring = False
         self.flush_start_vol = 0.0
+        self.flush_start_h = 0.0
         self.flush_start_time = 0.0
-        self.flush_results = []  # list of {"vol": float, "time": float}
+        self.flush_results = []  # list of {type, vol, time, en14055_rate}
+        # History for EN14055 effective flow rate (ignore first 1L, last 2L)
+        self.flush_vol_history = []  # list of (timestamp, volume, height)
+        # Auto-stop state: track minimum height during flush
+        self.flush_min_h = float("inf")
+        self.flush_rising = False
+        self.flush_rising_timer = 0.0
 
         self.click_points = []
         self.last_t = []
@@ -292,7 +310,10 @@ class SensorApp:
     # ── Sensor thread ───────────────────────────────────────────────
     def read_thread(self):
         rx_buf = bytearray()
-        port_idx = int(self.conn_params["io_port"].replace("Port ", ""))
+        try:
+            port_idx = int(self.conn_params["io_port"].replace("Port ", ""))
+        except ValueError:
+            port_idx = 1
         poll_sleep = self.conn_params["poll_ms"] / 1000.0
 
         while not self.stop_event.is_set():
@@ -343,26 +364,36 @@ class SensorApp:
                                         self.current_pressure = p_bar
                                         self.current_height = h
                                         self.current_volume = v
+                                        self.current_flow = f_rate
                                         self.t_buf.append(t)
                                         self.h_buf.append(h)
                                         self.v_buf.append(v)
                                         self.f_buf.append(f_rate)
 
-                                    if self.is_logging and self.csv_writer:
-                                        self.csv_writer.writerow([
-                                            datetime.now().isoformat(),
-                                            p_format(p_bar).split()[0],
-                                            f"{h:.1f}", f"{v:.2f}", f"{f_rate:.3f}"
-                                        ])
-                                        # Flush CSV every 50 rows to prevent data loss on crash
-                                        self._csv_row_count += 1
-                                        if self.csv_file and self._csv_row_count % 50 == 0:
-                                            self.csv_file.flush()
+                                    # Track flush history for EN14055 flow rate calc
+                                    if self.flush_measuring:
+                                        self.flush_vol_history.append(
+                                            (time.time(), v, h))
+                                        if h < self.flush_min_h:
+                                            self.flush_min_h = h
+
+                                    with self._csv_lock:
+                                        if self.is_logging and self.csv_writer:
+                                            self.csv_writer.writerow([
+                                                datetime.now().isoformat(),
+                                                p_format(p_bar).split()[0],
+                                                f"{h:.1f}", f"{v:.2f}", f"{f_rate:.3f}"
+                                            ])
+                                            # Flush CSV every 50 rows to prevent data loss on crash
+                                            self._csv_row_count += 1
+                                            if self.csv_file and self._csv_row_count % 50 == 0:
+                                                self.csv_file.flush()
                         except (json.JSONDecodeError, struct.error, ValueError) as e:
                             logging.debug(f"Parse error: {e}")
 
                     if len(rx_buf) > 4000:
-                        rx_buf = rx_buf[-2000:]
+                        cut = rx_buf.find(b'\x01\x0110', len(rx_buf) - 2000)
+                        rx_buf = rx_buf[cut:] if cut != -1 else rx_buf[-2000:]
                 except serial.SerialException as e:
                     logging.error(f"Serial read error: {e}")
                     break
@@ -406,7 +437,7 @@ class SensorApp:
             return
         self.stop_event.set()
         if self.read_thread_obj:
-            self.read_thread_obj.join(timeout=1.0)
+            self.read_thread_obj.join(timeout=3.0)
         if self.serial_conn:
             try:
                 self.serial_conn.close()
@@ -514,14 +545,14 @@ def _set_mwl():
     _refresh_limits()
 
 def _set_meniscus():
-    """Meniscus correction = Overflow height − measured water level at meniscus (EN 14055)."""
+    """Meniscus level = measured WL − overflow height (EN 14055)."""
     if app.profile.overflow <= 0:
         # Show a non-blocking warning in the status label temporarily
         dpg.set_value("lbl_cwl_st", "⚠ Set Overflow in Calibration first!")
         _bind_status("lbl_cwl_st", "theme_orange")
         return
     measured_level = app.get_avg_height()
-    app.profile.meniscus = app.profile.overflow - measured_level
+    app.profile.meniscus = measured_level - app.profile.overflow
     _refresh_limits()
 
 def _manual_cwl():
@@ -540,37 +571,35 @@ def _refresh_flush_table():
         dpg.add_text("No measurements yet.", parent="flush_table_area", color=COL_GRAY)
         return
 
-    # Header row
+    # Scrollable table — only element inside the child_window
     with dpg.table(parent="flush_table_area", header_row=True,
                    borders_innerH=True, borders_outerH=True,
                    borders_innerV=True, borders_outerV=True,
                    row_background=True, resizable=False,
-                   scrollY=True, freeze_rows=1, height=120):
-        dpg.add_table_column(label="#",    width_fixed=True, init_width_or_weight=22)
-        dpg.add_table_column(label="Type", width_fixed=True, init_width_or_weight=42)
-        dpg.add_table_column(label="Vol",  width_fixed=True, init_width_or_weight=52)
-        dpg.add_table_column(label="Time", width_fixed=True, init_width_or_weight=48)
-        dpg.add_table_column(label="L/s",  width_fixed=True, init_width_or_weight=44)
-        dpg.add_table_column(label="Del",  width_fixed=True, init_width_or_weight=30)
+                   scrollY=True, freeze_rows=1, height=-1):
+        dpg.add_table_column(label="#",    width_fixed=True, init_width_or_weight=20)
+        dpg.add_table_column(label="Type", width_fixed=True, init_width_or_weight=38)
+        dpg.add_table_column(label="Vol",  width_fixed=True, init_width_or_weight=46)
+        dpg.add_table_column(label="Time", width_fixed=True, init_width_or_weight=42)
+        dpg.add_table_column(label="L/s",  width_fixed=True, init_width_or_weight=40)
+        dpg.add_table_column(label="EN*",  width_fixed=True, init_width_or_weight=40)
+        dpg.add_table_column(label="Del",  width_fixed=True, init_width_or_weight=26)
 
         for i, r in enumerate(results):
-            rate = r["vol"] / r["time"] if r["time"] > 0 else 0
-            type_col = COL_ACCENT if r["type"] == "Full" else COL_ORANGE
+            total_rate = r["vol"] / r["time"] if r["time"] > 0 else 0
+            en_rate = r.get("en14055_rate")
+            en_str = f"{en_rate:.2f}" if en_rate is not None else "—"
+            type_col = COL_ACCENT if "Full" in r["type"] else COL_ORANGE
             with dpg.table_row():
                 dpg.add_text(str(i + 1))
-                dpg.add_text(r["type"], color=type_col)
+                dpg.add_text(r["type"][:4], color=type_col)
                 dpg.add_text(f"{r['vol']:.2f}L")
                 dpg.add_text(f"{r['time']:.1f}s")
-                dpg.add_text(f"{rate:.2f}")
-                dpg.add_button(label="X", width=24,
+                dpg.add_text(f"{total_rate:.2f}")
+                dpg.add_text(en_str,
+                             color=COL_ACCENT if en_rate is not None else COL_GRAY)
+                dpg.add_button(label="X", width=22,
                                user_data=i, callback=_delete_flush_row)
-
-    # Summary
-    n = len(results)
-    avg_v = sum(r["vol"] for r in results) / n
-    avg_t = sum(r["time"] for r in results) / n
-    dpg.add_text(f"avg {avg_v:.2f} L / {avg_t:.1f} s  ({n} runs)",
-                 parent="flush_table_area", color=COL_GRAY)
 
 def _delete_flush_row(sender, app_data, user_data):
     idx = user_data
@@ -583,15 +612,48 @@ def _toggle_flush_measure():
     if not app.flush_measuring:
         app.flush_measuring = True
         app.flush_start_vol = app.current_volume
+        app.flush_start_h = app.current_height
         app.flush_start_time = time.time()
+        app.flush_vol_history = []
+        app.flush_min_h = float("inf")
+        app.flush_rising = False
+        app.flush_rising_timer = 0.0
         dpg.set_item_label("btn_flush", "Stop Flush Measurement")
         dpg.bind_item_theme("btn_flush", "theme_btn_danger")
     else:
         app.flush_measuring = False
         elapsed = time.time() - app.flush_start_time
-        delta_vol = abs(app.flush_start_vol - app.current_volume)
-        flush_type = dpg.get_value("combo_flush_type") if dpg.does_item_exist("combo_flush_type") else "Full"
-        app.flush_results.append({"type": flush_type, "vol": delta_vol, "time": elapsed})
+        history = app.flush_vol_history
+        flush_type = dpg.get_value("combo_flush_type") if dpg.does_item_exist("combo_flush_type") else "Full Flush"
+
+        # Total volume = start minus the minimum volume seen (lowest water level)
+        if history:
+            min_vol = min(r[1] for r in history)
+            delta_vol = abs(app.flush_start_vol - min_vol)
+        else:
+            delta_vol = abs(app.flush_start_vol - app.current_volume)
+
+        # EN 14055 effective flow rate: skip first 1L and last 2L
+        en14055_rate = None
+        if history and delta_vol > 3.0:
+            v_start = app.flush_start_vol
+            v_skip_start = v_start - 1.0   # after 1L lost (volume threshold)
+            # end vol = lowest volume seen
+            v_end = min(r[1] for r in history)
+            v_skip_end = v_end + 2.0        # 2L before absolute end
+
+            t1 = next((r[0] for r in history if r[1] <= v_skip_start), None)
+            t2 = next((r[0] for r in history if r[1] <= v_skip_end), None)
+
+            if t1 and t2 and t2 > t1:
+                eff_vol = v_skip_start - v_skip_end
+                eff_time = t2 - t1
+                en14055_rate = eff_vol / eff_time if eff_time > 0 else None
+
+        app.flush_results.append({
+            "type": flush_type, "vol": delta_vol,
+            "time": elapsed, "en14055_rate": en14055_rate
+        })
         dpg.set_item_label("btn_flush", "Start Flush Measurement")
         dpg.bind_item_theme("btn_flush", "theme_btn_success")
         _refresh_flush_table()
@@ -605,17 +667,39 @@ def _check_compliance():
     p = app.profile
     results = []
 
-    # 1. Overflow margin: MWL must be >= 20mm below overflow
+    # 1. MWL: must be < 20mm below overflow (OF - MWL < 20mm)
     if p.overflow > 0 and p.mwl > 0:
-        margin_overflow = p.overflow - p.mwl
-        if margin_overflow >= 20:
-            results.append(f"[PASS] Overflow margin: {margin_overflow:.1f}mm >= 20mm")
+        dist_mwl = p.overflow - p.mwl
+        if 0 <= dist_mwl < 20:
+            results.append(f"[PASS] MWL from OF: {dist_mwl:.1f}mm < 20mm")
+        elif dist_mwl >= 20:
+            results.append(f"[FAIL] MWL from OF: {dist_mwl:.1f}mm >= 20mm (too far below OF)")
         else:
-            results.append(f"[FAIL] Overflow margin: {margin_overflow:.1f}mm < 20mm")
+            results.append(f"[FAIL] MWL above overflow! ({dist_mwl:.1f}mm)")
     else:
-        results.append("[----] Overflow margin: set Overflow & MWL first")
+        results.append("[----] MWL/Overflow: set both in Calibration first")
 
-    # 2. Air gap: water_discharge - CWL >= 20mm
+    # 2. CWL: must be < 10mm below overflow (OF - CWL < 10mm)
+    if p.overflow > 0 and p.cwl > 0:
+        dist_cwl = p.overflow - p.cwl
+        if 0 <= dist_cwl < 10:
+            results.append(f"[PASS] CWL from OF: {dist_cwl:.1f}mm < 10mm")
+        else:
+            results.append(f"[FAIL] CWL from OF: {dist_cwl:.1f}mm >= 10mm")
+    else:
+        results.append("[----] CWL/Overflow: set both in Calibration first")
+
+    # 3. Meniscus: |meniscus| < 5mm from OF
+    if p.overflow > 0 and p.meniscus != 0:
+        dist_menis = abs(p.meniscus)
+        if dist_menis < 5:
+            results.append(f"[PASS] Meniscus from OF: {dist_menis:.1f}mm < 5mm")
+        else:
+            results.append(f"[FAIL] Meniscus from OF: {dist_menis:.1f}mm >= 5mm")
+    else:
+        results.append("[----] Meniscus: capture meniscus level first")
+
+    # 4. Air gap: water_discharge - CWL >= 20mm
     if p.water_discharge > 0 and p.cwl > 0:
         air_gap = p.water_discharge - p.cwl
         if air_gap >= 20:
@@ -625,14 +709,19 @@ def _check_compliance():
     else:
         results.append("[----] Air gap: set Water Disch. & CWL first")
 
-    # 3. Flush volume <= nominal (if we have measurements)
+    # 5. Flush volume by type
     if app.flush_results:
-        avg_vol = sum(r["vol"] for r in app.flush_results) / len(app.flush_results)
-        results.append(f"[INFO] Avg flush volume: {avg_vol:.2f}L ({len(app.flush_results)} flushes)")
-        if avg_vol <= 6.0:
-            results.append(f"[PASS] Flush vol <= 6.0L")
-        else:
-            results.append(f"[WARN] Flush vol > 6.0L (check local regs)")
+        full = [r for r in app.flush_results if "Full" in r["type"]]
+        part = [r for r in app.flush_results if "Part" in r["type"]]
+        if full:
+            avg_full = sum(r["vol"] for r in full) / len(full)
+            results.append(f"[{'PASS' if avg_full <= 6.0 else 'WARN'}] Full flush avg: {avg_full:.2f}L (limit 6.0L)")
+            en_rates = [r["en14055_rate"] for r in full if r.get("en14055_rate") is not None]
+            if en_rates:
+                results.append(f"[INFO] Full EN14055 flow rate avg: {sum(en_rates)/len(en_rates):.3f} L/s")
+        if part:
+            avg_part = sum(r["vol"] for r in part) / len(part)
+            results.append(f"[{'PASS' if avg_part <= 4.0 else 'WARN'}] Part flush avg: {avg_part:.2f}L (limit 4.0L)")
     else:
         results.append("[----] Flush volume: no measurements yet")
 
@@ -640,46 +729,63 @@ def _check_compliance():
     if dpg.does_item_exist("dlg_comply"):
         dpg.delete_item("dlg_comply")
     with dpg.window(label="EN 14055 Compliance Check", modal=True, tag="dlg_comply",
-                     width=480, height=300, no_resize=True, pos=[360, 250]):
+                     width=500, height=360, no_resize=True, pos=[350, 220]):
         for line in results:
-            col = COL_GREEN if "[PASS]" in line else COL_RED if "[FAIL]" in line else COL_ORANGE if "[WARN]" in line else COL_GRAY
+            col = (COL_GREEN if "[PASS]" in line else
+                   COL_RED   if "[FAIL]" in line else
+                   COL_ORANGE if "[WARN]" in line else COL_GRAY)
             dpg.add_text(line, color=col)
         dpg.add_separator()
         dpg.add_button(label="Close", width=120, callback=lambda: dpg.delete_item("dlg_comply"))
 
 def _refresh_limits():
     p = app.profile
-    dpg.set_value("lbl_mwl",      f"{p.mwl:.1f} mm")
-    dpg.set_value("lbl_menis",    f"{p.meniscus:.1f} mm")
-    dpg.set_value("lbl_cwl",      f"{p.cwl:.1f} mm")
-    dpg.set_value("lbl_wd",       f"{p.water_discharge:.1f} mm")
-    dpg.set_value("lbl_overflow",  f"{p.overflow:.1f} mm")
-    dpg.set_value("lbl_profile",  f"Active Profile: {p.name}")
+    of = p.overflow
+
+    # Format with from-OF distance where relevant
+    def _mm(v):
+        return f"{v:.1f} mm"
+    def _mm_of(v):
+        if of > 0 and v > 0:
+            d = of - v
+            return f"{v:.1f} mm  ({d:+.1f} OF)"
+        return f"{v:.1f} mm"
+
+    dpg.set_value("lbl_mwl",     _mm_of(p.mwl))
+    dpg.set_value("lbl_menis",   _mm(p.meniscus))
+    dpg.set_value("lbl_cwl",     _mm_of(p.cwl))
+    dpg.set_value("lbl_wd",      _mm(p.water_discharge))
+    dpg.set_value("lbl_overflow", _mm(of))
+    dpg.set_value("lbl_profile", f"Active Profile: {p.name}")
+    if dpg.does_item_exist("lbl_residual"):
+        dpg.set_value("lbl_residual", _mm(p.cwl))
 
     w = app.app_settings.get("avg_window", 0.5)
-    dpg.set_item_label("btn_mwl", f"Set MWL (Avg {w}s)")
-    dpg.set_item_label("btn_menis", f"Set Meniscus (Avg {w}s)")
+    dpg.set_item_label("btn_mwl",   f"Set MWL  (avg {w}s)")
+    dpg.set_item_label("btn_menis", f"Set Meniscus (avg {w}s)")
 
     show_manual = app.app_settings.get("cwl_mode") == "Manual" and app.cwl_state == "ARMED"
     dpg.configure_item("btn_manual_cwl", show=show_manual)
 
+    # Airgap = WD − CWL
     if p.water_discharge > 0 and p.cwl > 0:
-        m = p.water_discharge - p.cwl
-        if m >= 20:
-            dpg.set_value("lbl_margin", f"MARGIN: OK ({m:.1f}mm)")
-            _bind_status("lbl_margin", "theme_green")
+        airgap = p.water_discharge - p.cwl
+        if airgap >= 20:
+            dpg.set_value("lbl_airgap", f"Airgap: OK  ({airgap:.1f}mm)")
+            _bind_status("lbl_airgap", "theme_green")
         else:
-            dpg.set_value("lbl_margin", f"MARGIN: FAIL ({m:.1f}mm < 20)")
-            _bind_status("lbl_margin", "theme_red")
+            dpg.set_value("lbl_airgap", f"Airgap: FAIL ({airgap:.1f}mm < 20)")
+            _bind_status("lbl_airgap", "theme_red")
     else:
-        dpg.set_value("lbl_margin", "MARGIN: WAITING")
-        _bind_status("lbl_margin", "theme_gray")
+        dpg.set_value("lbl_airgap", "Airgap: —")
+        _bind_status("lbl_airgap", "theme_gray")
 
 def _toggle_log():
     if not app.is_logging:
         EXPORT_DIR.mkdir(exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        fn = str(EXPORT_DIR / f"{app.profile.name.replace(' ', '_')}_{ts}.csv")
+        safe_name = re.sub(r'[^\w\-]', '_', app.profile.name)
+        fn = str(EXPORT_DIR / f"{safe_name}_{ts}.csv")
         try:
             app.csv_file = open(fn, "w", newline="")
             app.csv_writer = csv.writer(app.csv_file)
@@ -704,9 +810,11 @@ def _toggle_log():
 def _toggle_pause():
     app.chart_paused = not app.chart_paused
     if app.chart_paused:
+        # Take one final snapshot so the frozen chart shows latest data
+        update_chart()
         dpg.set_item_label("btn_pause", "Resume")
         dpg.bind_item_theme("btn_pause", "theme_btn_success")
-        # Unlock axes so user can pan/scroll freely
+        # Release axes so user can pan/scroll freely over frozen data
         dpg.set_axis_limits_auto("x_axis")
         dpg.set_axis_limits_auto("y_axis")
         # Show drag lines at current limit values (height mode only)
@@ -717,7 +825,7 @@ def _toggle_pause():
                                default_value=app.profile.cwl if app.profile.cwl > 0 else 0.0)
     else:
         dpg.set_item_label("btn_pause", "Pause")
-        dpg.bind_item_theme("btn_pause", 0)  # reset to default
+        dpg.bind_item_theme("btn_pause", 0)
         dpg.configure_item("drag_mwl", show=False)
         dpg.configure_item("drag_cwl", show=False)
 
@@ -798,7 +906,7 @@ def _export_screenshot():
     """Save a PNG of the entire viewport to the exports folder."""
     EXPORT_DIR.mkdir(exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    safe_name = app.profile.name.replace(" ", "_")
+    safe_name = re.sub(r'[^\w\-]', '_', app.profile.name)
     filename = str(EXPORT_DIR / f"{safe_name}_{ts}.png")
     try:
         dpg.output_frame_buffer(filename)
@@ -897,6 +1005,8 @@ def _open_calibration_dlg():
             v = float(dpg.get_value("cal_v").replace(",", "."))
         except ValueError:
             return
+        if p < 0 or h < 0 or v < 0:
+            return
         if _cal_edit_idx[0] is not None and 0 <= _cal_edit_idx[0] < len(clone.points):
             clone.points[_cal_edit_idx[0]] = {"p": p, "h": h, "v": v}
             _cal_edit_idx[0] = None
@@ -989,11 +1099,11 @@ def _open_calibration_dlg():
 def _cal_export_json(profile_clone):
     """Export calibration points as JSON to exports folder."""
     EXPORT_DIR.mkdir(exist_ok=True)
-    safe = profile_clone.name.replace(" ", "_")
+    safe = re.sub(r'[^\w\-]', '_', profile_clone.name)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     fp = EXPORT_DIR / f"{safe}_cal_points_{ts}.json"
     try:
-        with open(fp, "w") as f:
+        with open(fp, "w", encoding="utf-8") as f:
             json.dump({"name": profile_clone.name, "points": profile_clone.points}, f, indent=4)
         _show_toast(f"Exported: {fp.name}")
     except OSError as e:
@@ -1252,16 +1362,38 @@ def _bind_status(item: str, base_tag: str):
     # Track for _apply_theme reruns
     setattr(app, f"_{item}_theme", base_tag)
 
+_left_panel_visible = True
+
+def _toggle_left_panel():
+    global _left_panel_visible
+    _left_panel_visible = not _left_panel_visible
+    dpg.configure_item("left_panel", show=_left_panel_visible)
+    dpg.set_item_label("btn_collapse", "▶" if not _left_panel_visible else "◀")
+
 # ── Main loop callbacks ────────────────────────────────────────────
 def update_ui():
     with app.data_lock:
         h = app.current_height
         v = app.current_volume
         p = app.current_pressure
+        f = app.current_flow
 
     dpg.set_value("lbl_h", f"{h:.1f} mm")
     dpg.set_value("lbl_v", f"{v:.2f} L")
     dpg.set_value("lbl_p", p_format(p))
+    if dpg.does_item_exist("lbl_f"):
+        dpg.set_value("lbl_f", f"{f:.3f} L/s")
+
+    # Safety margin = OF − current height
+    of = app.profile.overflow
+    if dpg.does_item_exist("lbl_safety_margin"):
+        if of > 0:
+            sm = of - h
+            col = COL_GREEN if sm >= 20 else (COL_ORANGE if sm >= 5 else COL_RED)
+            dpg.set_value("lbl_safety_margin", f"{sm:.1f} mm")
+            dpg.configure_item("lbl_safety_margin", color=col)
+        else:
+            dpg.set_value("lbl_safety_margin", "— mm")
 
     # Connection status icon is updated on connect/disconnect events, not every frame
 
@@ -1298,46 +1430,34 @@ def update_chart():
     if not t_data or not raw_y:
         return
 
-    # Window filter FIRST to reduce smoothing workload
-    ws = dpg.get_value("combo_win")
-    secs = {"10s": 10, "30s": 30, "60s": 60, "5min": 300}.get(ws, None)
-    ct = t_data[-1]
-
-    if secs:
-        t_min = max(0, ct - secs)
-        start_i = bisect.bisect_left(t_data, t_min)
-        t_win = t_data[start_i:]
-        y_win = raw_y[start_i:]
-    else:
-        t_win = t_data
-        y_win = raw_y
-
+    # Always put full buffer into the series — user can scroll anywhere
     alg = dpg.get_value("combo_smth")
-    y_s = smooth(y_win, alg)
+    y_s = smooth(raw_y, alg)
 
-    # Store for tooltip/delta snap (always update — hover works even when paused)
-    app.last_t = list(t_win)
-    app.last_y = list(y_s)
+    app.last_t = t_data
+    app.last_y = y_s
 
-    # When paused: update the line data so the full buffer is visible,
-    # but do NOT force axis limits — let the user pan/scroll freely.
     dpg.set_value("line_main", [app.last_t, app.last_y])
 
+    # Auto-scroll: restrict the visible axis window, but all data remains accessible
     if not app.chart_paused:
         auto_scroll = dpg.get_value("chk_autoscroll")
-        if auto_scroll and app.last_t:
-            x_min = app.last_t[0]
-            x_max = app.last_t[-1]
+        ws = dpg.get_value("combo_win")
+        secs = {"10s": 10, "30s": 30, "60s": 60, "5min": 300}.get(ws, None)
+        if auto_scroll and secs and t_data:
+            x_max = t_data[-1]
+            x_min = max(t_data[0], x_max - secs)
             if x_max - x_min < 1:
                 x_max = x_min + 1
             dpg.set_axis_limits("x_axis", x_min, x_max)
-
-            y_min_v = min(app.last_y)
-            y_max_v = max(app.last_y)
-            margin = max((y_max_v - y_min_v) * 0.1, 0.5)
-            dpg.set_axis_limits("y_axis", y_min_v - margin, y_max_v + margin)
+            # Compute y range for the visible window only
+            start_i = bisect.bisect_left(t_data, x_min)
+            y_view = y_s[start_i:] if start_i < len(y_s) else y_s
+            if y_view:
+                y_lo, y_hi = min(y_view), max(y_view)
+                margin = max((y_hi - y_lo) * 0.1, 0.5)
+                dpg.set_axis_limits("y_axis", y_lo - margin, y_hi + margin)
         else:
-            # Auto-scroll off while live: release axes for free pan
             dpg.set_axis_limits_auto("x_axis")
             dpg.set_axis_limits_auto("y_axis")
 
@@ -1377,6 +1497,26 @@ def update_hover_tooltip():
     dpg.set_value("hover_annot", (st, sy))
     dpg.configure_item("hover_annot", label=f"T: {st:.1f}s\n{sy:.2f} {unit}", show=True)
 
+def _tick_flush_auto_stop(h: float, now: float):
+    """Auto-stop flush when water level reaches minimum and starts rising back.
+    Uses the same drop-detection approach as CWL detection."""
+    if not app.flush_measuring:
+        return
+    elapsed = now - app.flush_start_time
+    if elapsed < 3.0:   # need at least 3 s before auto-stop is considered
+        return
+    if h < app.flush_min_h:
+        app.flush_min_h = h
+        app.flush_rising = False
+    # Rising threshold: 5mm above minimum = flush complete
+    if not app.flush_rising and h > app.flush_min_h + 5.0:
+        app.flush_rising = True
+        app.flush_rising_timer = now
+    if app.flush_rising and (now - app.flush_rising_timer >= 2.0):
+        # Water has been rising for 2 s — auto-stop
+        _toggle_flush_measure()
+
+
 def frame_callback():
     now = time.time()
     ui_interval = app.app_settings.get("ui_refresh_ms", 50) / 1000.0
@@ -1388,11 +1528,13 @@ def frame_callback():
             h_history = list(app.h_buf)[-150:] if app.h_buf else [h]
         if app.tick_cwl(h, h_history):
             _refresh_limits()
+        _tick_flush_auto_stop(h, now)
         update_ui()
         _check_toast_dismiss(now)
         app._last_ui_tick = now
     if now - app._last_chart_tick >= chart_interval:
-        update_chart()
+        if not app.chart_paused:
+            update_chart()
         app._last_chart_tick = now
     update_hover_tooltip()
 
@@ -1540,12 +1682,15 @@ def _apply_theme(mode: str):
     for tag in ("lbl_p", "lbl_conn"):
         if dpg.does_item_exist(tag):
             dpg.configure_item(tag, color=gry)
+    for tag in ("lbl_f",):
+        if dpg.does_item_exist(tag):
+            dpg.configure_item(tag, color=COL_ORANGE if is_dark else _LT_ORANGE)
 
     # Store mode first so _bind_status picks the correct variant below
     app.app_settings["ui_theme"] = mode
 
     # Re-bind all tracked status labels — _bind_status reads ui_theme to choose dark/lt variant
-    for item in ("lbl_margin", "lbl_cwl_st", "lbl_flush"):
+    for item in ("lbl_airgap", "lbl_cwl_st"):
         if dpg.does_item_exist(item):
             base = getattr(app, f"_{item}_theme", None)
             if base:
@@ -1601,10 +1746,13 @@ with dpg.window(tag="main_win"):
     # ── Status bar (top) ─────────────────────────────────────────────
     with dpg.table(header_row=False, borders_innerV=False, borders_outerH=False,
                    borders_outerV=False, resizable=False):
-        dpg.add_table_column(init_width_or_weight=1.0)   # profile name (stretches)
+        dpg.add_table_column(width_fixed=True, init_width_or_weight=28)   # collapse btn
+        dpg.add_table_column(init_width_or_weight=1.0)                    # profile name
         dpg.add_table_column(width_fixed=True, init_width_or_weight=180)  # conn status
         dpg.add_table_column(width_fixed=True, init_width_or_weight=160)  # connect btn
         with dpg.table_row():
+            dpg.add_button(label="◀", tag="btn_collapse",
+                           callback=_toggle_left_panel, width=24)
             dpg.add_text("Active Profile: Untitled Profile", tag="lbl_profile")
             with dpg.group(horizontal=True):
                 dpg.add_text("", tag="lbl_conn_icon", color=COL_GRAY)
@@ -1618,7 +1766,7 @@ with dpg.window(tag="main_win"):
     with dpg.group(horizontal=True):
 
         # ── Left panel ───────────────────────────────────────────────
-        with dpg.child_window(width=295, border=False):
+        with dpg.child_window(width=340, border=False, tag="left_panel"):
 
             # Section: Real-Time Data
             dpg.add_text("  LIVE DATA", color=COL_ACCENT, tag="hdr_live")
@@ -1627,20 +1775,21 @@ with dpg.window(tag="main_win"):
             dpg.add_text("0.0 mm",     tag="lbl_h", color=COL_ACCENT)
             dpg.add_text("0.00 L",     tag="lbl_v", color=COL_GREEN)
             dpg.add_text("0.0000 bar", tag="lbl_p", color=COL_GRAY)
+            dpg.add_text("0.000 L/s",  tag="lbl_f", color=COL_ORANGE)
 
-            dpg.add_spacer(height=10)
+            dpg.add_spacer(height=8)
 
-            # Section: EN 14055 Limits — capture buttons
+            # Section: EN 14055 Limits
             dpg.add_text("  EN 14055 LIMITS", color=COL_ACCENT, tag="hdr_limits")
             dpg.add_separator()
             dpg.add_spacer(height=2)
 
             _avg = app.app_settings.get("avg_window", 0.5)
-            dpg.add_button(label=f"Capture MWL  (avg {_avg}s)",
+            dpg.add_button(label=f"Set MWL  (avg {_avg}s)",
                            tag="btn_mwl", callback=_set_mwl, width=-1)
             dpg.bind_item_theme("btn_mwl", "theme_btn_action")
 
-            dpg.add_button(label="Capture Meniscus",
+            dpg.add_button(label=f"Set Meniscus (avg {_avg}s)",
                            tag="btn_menis", callback=_set_meniscus, width=-1)
             dpg.bind_item_theme("btn_menis", "theme_btn_action")
 
@@ -1649,48 +1798,44 @@ with dpg.window(tag="main_win"):
                            callback=_manual_cwl, width=-1, show=False)
             dpg.bind_item_theme("btn_manual_cwl", "theme_btn_action")
 
-            dpg.add_spacer(height=6)
-
-            # Measured / captured values
-            with dpg.table(header_row=False, borders_innerV=False, borders_outerH=False,
-                           borders_outerV=False, resizable=False):
-                dpg.add_table_column(width_fixed=True, init_width_or_weight=120)
-                dpg.add_table_column(init_width_or_weight=1.0)
-
-                for lbl, tag in [
-                    ("MWL",          "lbl_mwl"),
-                    ("Meniscus corr","lbl_menis"),
-                    ("CWL",          "lbl_cwl"),
-                ]:
-                    with dpg.table_row():
-                        dpg.add_text(lbl + ":", color=COL_GRAY)
-                        dpg.add_text("0.0 mm", tag=tag)
-
             dpg.add_spacer(height=4)
 
-            # Calibration reference values (read-only, from profile)
-            with dpg.table(header_row=False, borders_innerV=False, borders_outerH=False,
-                           borders_outerV=False, resizable=False):
-                dpg.add_table_column(width_fixed=True, init_width_or_weight=120)
-                dpg.add_table_column(init_width_or_weight=1.0)
+            # ── Two-column limits grid ──────────────────────────────
+            with dpg.group(horizontal=True):
+                # Left column
+                with dpg.group(width=160):
+                    dpg.add_text("MWL:", color=COL_GRAY)
+                    dpg.add_text("0.0 mm", tag="lbl_mwl")
+                    dpg.add_spacer(height=3)
+                    dpg.add_text("CWL:", color=COL_GRAY)
+                    dpg.add_text("0.0 mm", tag="lbl_cwl")
+                    dpg.add_spacer(height=3)
+                    dpg.add_text("Residual WL:", color=COL_GRAY)
+                    dpg.add_text("0.0 mm", tag="lbl_residual")
+                    dpg.add_spacer(height=3)
+                    dpg.add_text("Safety Margin:", color=COL_GRAY)
+                    dpg.add_text("— mm", tag="lbl_safety_margin")
 
-                for lbl, tag in [
-                    ("Water Disch.", "lbl_wd"),
-                    ("Overflow",     "lbl_overflow"),
-                ]:
-                    with dpg.table_row():
-                        dpg.add_text(lbl + ":", color=COL_GRAY)
-                        dpg.add_text("0.0 mm", tag=tag, color=COL_GRAY)
+                # Right column
+                with dpg.group():
+                    dpg.add_text("Meniscus:", color=COL_GRAY)
+                    dpg.add_text("0.0 mm", tag="lbl_menis")
+                    dpg.add_spacer(height=3)
+                    dpg.add_text("Water Disch.:", color=COL_GRAY)
+                    dpg.add_text("0.0 mm", tag="lbl_wd", color=COL_GRAY)
+                    dpg.add_spacer(height=3)
+                    dpg.add_text("Overflow:", color=COL_GRAY)
+                    dpg.add_text("0.0 mm", tag="lbl_overflow", color=COL_GRAY)
 
-            dpg.add_spacer(height=8)
+            dpg.add_spacer(height=6)
 
-            # Compliance status
-            dpg.add_text("MARGIN: WAITING", tag="lbl_margin")
-            _bind_status("lbl_margin", "theme_gray")
+            # Status indicators
+            dpg.add_text("Airgap: —", tag="lbl_airgap")
+            _bind_status("lbl_airgap", "theme_gray")
             dpg.add_text("CWL: IDLE", tag="lbl_cwl_st")
             _bind_status("lbl_cwl_st", "theme_gray")
 
-            dpg.add_spacer(height=10)
+            dpg.add_spacer(height=8)
 
             # Section: Flush Test
             dpg.add_text("  FLUSH TEST  (EN 14055)", color=COL_ACCENT, tag="hdr_flush")
@@ -1707,11 +1852,13 @@ with dpg.window(tag="main_win"):
             dpg.add_button(label="Start Flush Measurement", tag="btn_flush",
                            callback=_toggle_flush_measure, width=-1)
             dpg.bind_item_theme("btn_flush", "theme_btn_success")
+            dpg.add_text("* EN col = rate ignoring first 1L and last 2L",
+                         color=COL_GRAY)
 
-            dpg.add_spacer(height=4)
-            # Dynamic table — rebuilt after each measurement
-            with dpg.child_window(tag="flush_table_area", height=130,
-                                  border=False, no_scrollbar=False):
+            dpg.add_spacer(height=3)
+            # Dynamic table — internal scroll, no outer scroll
+            with dpg.child_window(tag="flush_table_area", height=145,
+                                  border=False, no_scrollbar=True):
                 dpg.add_text("No measurements yet.", color=COL_GRAY)
 
             dpg.add_spacer(height=3)
@@ -1720,7 +1867,7 @@ with dpg.window(tag="main_win"):
                 dpg.bind_item_theme(dpg.last_item(), "theme_btn_danger")
                 dpg.add_button(label="Compliance Check", callback=_check_compliance, width=-1)
 
-            dpg.add_spacer(height=10)
+            dpg.add_spacer(height=8)
 
             # Section: Data Log
             dpg.add_text("  DATA LOG", color=COL_ACCENT, tag="hdr_log")
@@ -1752,6 +1899,7 @@ with dpg.window(tag="main_win"):
                 dpg.add_button(label="Pause", tag="btn_pause",
                                callback=_toggle_pause, width=78)
                 dpg.add_button(label="Screenshot", callback=_export_screenshot, width=100)
+                dpg.add_button(label="Colors", callback=_open_line_colors_dlg, width=58)
                 dpg.add_spacer(width=8)
                 dpg.add_text("Delta:", color=COL_GRAY)
                 dpg.add_text("---", tag="lbl_delta", color=COL_ACCENT)
@@ -1859,6 +2007,11 @@ if _font_large:
     dpg.bind_item_font("lbl_v", _font_large)
 if _font_medium:
     dpg.bind_item_font("lbl_p", _font_medium)
+    dpg.bind_item_font("lbl_f", _font_medium)
+    # Limit value labels — slightly larger for readability
+    for _tag in ("lbl_mwl", "lbl_cwl", "lbl_menis", "lbl_wd",
+                 "lbl_overflow", "lbl_residual", "lbl_safety_margin"):
+        dpg.bind_item_font(_tag, _font_medium)
 
 with dpg.handler_registry():
     dpg.add_mouse_click_handler(button=dpg.mvMouseButton_Left, callback=_plot_clicked)
