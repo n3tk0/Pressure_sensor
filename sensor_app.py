@@ -318,6 +318,7 @@ class SensorApp:
         self.last_t = []
         self.last_y = []
         self.chart_paused = False
+        self.manual_mwl_cwl_pending = False  # waiting for user chart-click to set MWL/CWL
         self._last_ui_tick = 0
         self._last_chart_tick = 0
 
@@ -659,6 +660,36 @@ def _set_cwl():
     app.cwl_auto_state = "IDLE"   # cancel auto if running
     app.profile.cwl = app.get_avg_height()
     _refresh_limits()
+
+
+def _manual_mwl_cwl():
+    """Toggle manual MWL/CWL selection mode.
+
+    On first press: pause chart, enter pending state — next chart click selects
+    the MWL moment. The app then:
+      • averages the 1 s window before the click → mwl_fault
+      • reads the smoothed value at click+2 s → cwl
+    On second press (cancel): exit pending state, resume chart.
+    """
+    if app.manual_mwl_cwl_pending:
+        # ── Cancel ───────────────────────────────────────────────────
+        app.manual_mwl_cwl_pending = False
+        dpg.set_item_label("btn_manual_mwlcwl", "Manual MWL/CWL")
+        dpg.bind_item_theme("btn_manual_mwlcwl", "theme_btn_action")
+        if app.chart_paused:
+            _toggle_pause()
+        return
+
+    # ── Arm ──────────────────────────────────────────────────────────
+    if app.profile.overflow <= 0:
+        _show_toast("⚠ Set Overflow level in Calibration first!")
+        return
+    if not app.chart_paused:
+        _toggle_pause()   # pause so user can click a frozen point
+    app.manual_mwl_cwl_pending = True
+    dpg.set_item_label("btn_manual_mwlcwl", "Cancel Manual MWL/CWL")
+    dpg.bind_item_theme("btn_manual_mwlcwl", "theme_btn_danger")
+    _show_toast("Chart paused — click the MWL moment on the graph")
 
 
 def _set_meniscus():
@@ -1058,6 +1089,37 @@ def _plot_clicked(sender, app_data):
     pos = dpg.get_plot_mouse_pos()
     st, sy = _snap_to_line(pos[0])
     if st is None:
+        return
+
+    # ── Manual MWL/CWL selection mode ───────────────────────────────
+    if app.manual_mwl_cwl_pending:
+        t_click = st
+        ts = app.last_t
+        ys = app.last_y
+
+        # MWL = average of smoothed line in [t_click-1s … t_click]
+        mwl_pts = [y for t, y in zip(ts, ys) if t_click - 1.0 <= t <= t_click]
+        mwl = sum(mwl_pts) / len(mwl_pts) if mwl_pts else sy
+
+        # CWL = smoothed value at t_click + 2s (nearest point at or after)
+        target_t = t_click + 2.0
+        cwl = None
+        for t, y in zip(ts, ys):
+            if t >= target_t:
+                cwl = y
+                break
+        if cwl is None:
+            cwl = ys[-1] if ys else sy   # fallback: last available point
+
+        app.profile.mwl_fault = mwl
+        app.profile.cwl = cwl
+        app.manual_mwl_cwl_pending = False
+        dpg.set_item_label("btn_manual_mwlcwl", "Manual MWL/CWL")
+        dpg.bind_item_theme("btn_manual_mwlcwl", "theme_btn_action")
+        _refresh_limits()
+        _show_toast(f"MWL = {mwl:.1f} mm  |  CWL = {cwl:.1f} mm")
+        if app.chart_paused:
+            _toggle_pause()
         return
 
     if len(app.click_points) >= 2:
@@ -1608,9 +1670,12 @@ def update_ui():
         dpg.set_value("lbl_cwl_st", "RWL: IDLE (set NWL to arm)")
         _bind_status("lbl_cwl_st", "theme_gray")
 
-    # CWL auto-detection state (EN14055 §5.3.4 — drop-detect after supply cutoff)
+    # MWL/CWL detection state
     if dpg.does_item_exist("lbl_cwl_auto_st"):
-        if app.cwl_auto_state == "ARMED":
+        if app.manual_mwl_cwl_pending:
+            dpg.set_value("lbl_cwl_auto_st", "MWL/CWL: click the MWL point on chart")
+            _bind_status("lbl_cwl_auto_st", "theme_orange")
+        elif app.cwl_auto_state == "ARMED":
             dpg.set_value("lbl_cwl_auto_st", "CWL: ARMED — watching for drop ≥1.5mm")
             _bind_status("lbl_cwl_auto_st", "theme_blue")
         elif app.cwl_auto_state == "WAITING":
@@ -1623,7 +1688,7 @@ def update_ui():
                           f"CWL: {app.profile.cwl:.1f}mm  ({diff:+.1f}mm OF)")
             _bind_status("lbl_cwl_auto_st", "theme_green")
         else:
-            dpg.set_value("lbl_cwl_auto_st", "CWL: IDLE — arm while at MWL")
+            dpg.set_value("lbl_cwl_auto_st", "MWL/CWL: IDLE — use Auto-detect or Manual")
             _bind_status("lbl_cwl_auto_st", "theme_gray")
 
 def update_chart():
@@ -2027,11 +2092,12 @@ with dpg.window(tag="main_win"):
 
             # CWL auto-detect (§5.2.4b) — arm while water is at MWL (supply running, OF overflowing).
             # Auto-finds cutoff in history, captures CWL 2s later, and saves MWL from peak.
-            dpg.add_button(label="Arm CWL Auto-detect", callback=_arm_cwl_auto, width=-1)
+            dpg.add_button(label="Auto-detect MWL/CWL", callback=_arm_cwl_auto, width=-1)
             dpg.bind_item_theme(dpg.last_item(), "theme_btn_action")
-            # Manual fallback — press exactly 2s after cutting supply
-            dpg.add_button(label="Set CWL (manual, 2s after cutoff)", callback=_set_cwl, width=-1)
-            dpg.bind_item_theme(dpg.last_item(), "theme_btn_action")
+            # Manual fallback — pause chart, click MWL moment, app computes 1s avg back = MWL and +2s = CWL
+            dpg.add_button(label="Manual MWL/CWL", tag="btn_manual_mwlcwl",
+                           callback=_manual_mwl_cwl, width=-1)
+            dpg.bind_item_theme("btn_manual_mwlcwl", "theme_btn_action")
 
             # Manual RWL timer — only shown in Manual mode
             dpg.add_button(label="Start RWL 2s Timer", tag="btn_manual_rwl",
