@@ -123,20 +123,21 @@ class CisternProfile:
     def __init__(self):
         self.name = "Untitled Profile"
         self.points = []
-        self.mwl = 0.0
-        self.meniscus = 0.0
-        self.cwl = 0.0          # Critical Water Level = fault fill level ≈ OF
-        self.overflow = 0.0
+        self.mwl = 0.0           # NWL — Nominal Water Level (normal fill, BELOW overflow)
+        self.mwl_fault = 0.0     # MWL — Max Water Level during fault (ABOVE overflow, ≤20mm)
+        self.meniscus = 0.0      # Meniscus delta above OF (≤5mm above overflow)
+        self.cwl = 0.0           # CWL — Critical WL 2s after fault cutoff (ABOVE overflow, ≤10mm)
+        self.overflow = 0.0      # OF — overflow level (absolute height)
         self.water_discharge = 0.0
-        self.residual_wl = 0.0  # Residual Water Level = minimum after flush
+        self.residual_wl = 0.0   # RWL — Residual Water Level (min after flush)
 
     def to_dict(self):
         return {k: getattr(self, k) for k in
-                ["name", "points", "mwl", "meniscus", "cwl", "overflow",
+                ["name", "points", "mwl", "mwl_fault", "meniscus", "cwl", "overflow",
                  "water_discharge", "residual_wl"]}
 
     def from_dict(self, d):
-        for k in ["name", "points", "mwl", "meniscus", "cwl", "overflow",
+        for k in ["name", "points", "mwl", "mwl_fault", "meniscus", "cwl", "overflow",
                   "water_discharge", "residual_wl"]:
             if k in d:
                 setattr(self, k, d[k])
@@ -544,8 +545,9 @@ def _toggle_connect():
             _bind_status("lbl_conn", "theme_red")
 
 def _set_mwl():
-    """Capture MWL — normal fill level where valve closes.
-    EN 14055: OF − MWL must be ≥ 20 mm (safety margin)."""
+    """Capture NWL — Nominal Water Level = normal fill level when inlet valve closes.
+    EN 14055 §3.16/§5.2.6: Safety margin c = OF − NWL ≥ 20 mm.
+    Also arms automatic RWL detection for the next flush."""
     val = app.get_avg_height()
     app.profile.mwl = val
     # Arm RWL (Residual WL) detection — will fire after next flush drop
@@ -553,16 +555,29 @@ def _set_mwl():
     app.cwl_peak = val
     _refresh_limits()
 
+def _set_mwl_fault():
+    """Capture MWL — Maximum Water Level during inlet valve fault (continuous supply).
+    EN 14055 §3.11/§5.2.4a: MWL − OF ≤ 20 mm.
+    Procedure: force inlet valve open, let level stabilise while overflowing, capture."""
+    if app.profile.overflow <= 0:
+        _show_toast("⚠ Set Overflow level in Calibration first!")
+        return
+    app.profile.mwl_fault = app.get_avg_height()
+    _refresh_limits()
+
 def _set_cwl():
-    """Capture CWL manually — used during fault simulation (valve stuck open).
-    EN 14055: CWL = highest water level under fault conditions, typically ≈ OF.
-    Air Gap = WD − CWL must be ≥ 20 mm."""
+    """Capture CWL — Critical Water Level = 2s after supply is cut off during fault test.
+    EN 14055 §3.12/§5.2.4b: CWL − OF ≤ 10 mm.
+    Procedure: during fault overflow test, cut supply and wait 2 s, then press."""
+    if app.profile.overflow <= 0:
+        _show_toast("⚠ Set Overflow level in Calibration first!")
+        return
     app.profile.cwl = app.get_avg_height()
     _refresh_limits()
 
 def _set_cwl_to_of():
-    """Set CWL = Overflow level (standard Type AG configuration).
-    For most WC cisterns CWL = OF; the air gap = WD − OF."""
+    """Set CWL = Overflow level (minimum compliant case for Type AG).
+    CWL − OF = 0 mm which satisfies the ≤ 10 mm requirement."""
     if app.profile.overflow <= 0:
         _show_toast("⚠ Set Overflow level in Calibration first!")
         return
@@ -571,10 +586,9 @@ def _set_cwl_to_of():
     _show_toast("CWL set to Overflow level")
 
 def _set_meniscus():
-    """Capture meniscus — capillary rise at the inlet above the water surface.
-    EN 14055: Meniscus = measured_level − OF.  Must be < 5 mm.
-    Procedure: fill cistern to the point where water just touches the inlet tube
-    and press this button."""
+    """Capture meniscus — surface tension level during overflow, just above OF.
+    EN 14055 §3.15/§5.2.4c: Meniscus − OF ≤ 5 mm.
+    Procedure: let cistern overflow until level stabilises, then press."""
     if app.profile.overflow <= 0:
         _show_toast("⚠ Set Overflow level in Calibration first!")
         return
@@ -691,73 +705,81 @@ def _clear_flush():
     _refresh_flush_table()
 
 def _check_compliance():
-    """Run EN 14055 compliance checks.
+    """Run EN 14055:2015 compliance checks.
 
     EN 14055 height order (bottom → top):
-      Residual WL  <  MWL  <  CWL ≈ OF  <  WD
+      RWL < NWL < OF < Meniscus (≤+5mm) < CWL (≤+10mm) < MWL (≤+20mm)
 
-    Key requirements:
-      Safety Margin = OF − MWL  ≥ 20 mm
-      Air Gap       = WD − CWL  ≥ 20 mm  (CWL ≈ OF for Type AG)
-      Meniscus      = level − OF < 5 mm
+    Key requirements (§5.2.4, §5.2.6, §5.2.7):
+      §5.2.6  Safety margin c = OF − NWL  ≥ 20 mm
+      §5.2.4a MWL (fault)     − OF        ≤ 20 mm  (MWL above overflow)
+      §5.2.4b CWL             − OF        ≤ 10 mm  (CWL above overflow, 2s after cutoff)
+      §5.2.4c Meniscus        − OF        ≤  5 mm  (surface tension above overflow)
+      §5.2.7  Air gap a = OF − inlet orifice ≥ 20 mm  (ruler measurement)
     """
     p = app.profile
     results = []
 
-    # ── 1. Safety Margin: OF − MWL ≥ 20 mm ───────────────────────────
-    # Ensures cistern does not overflow under normal fill conditions.
+    # ── 1. Safety Margin c: OF − NWL ≥ 20 mm (§5.2.6) ───────────────
+    # NWL = nominal fill level (= p.mwl, captured during normal fill).
+    # Ensures the overflow does not activate during normal filling.
     if p.overflow > 0 and p.mwl > 0:
         sm = p.overflow - p.mwl
         if sm >= 20:
-            results.append(f"[PASS] Safety margin (OF−MWL): {sm:.1f} mm ≥ 20 mm")
+            results.append(f"[PASS] Safety margin c (OF−NWL): {sm:.1f} mm ≥ 20 mm")
         else:
-            results.append(f"[FAIL] Safety margin (OF−MWL): {sm:.1f} mm < 20 mm")
+            results.append(f"[FAIL] Safety margin c (OF−NWL): {sm:.1f} mm < 20 mm")
     else:
-        results.append("[----] Safety margin: capture MWL and set Overflow first")
+        results.append("[----] Safety margin c: capture NWL and set Overflow first")
 
-    # ── 2. Air Gap: WD − CWL ≥ 20 mm ────────────────────────────────
-    # CWL = fault-condition fill level ≈ OF (Type AG). Prevents backflow.
-    if p.water_discharge > 0 and p.cwl > 0:
-        ag = p.water_discharge - p.cwl
-        if ag >= 20:
-            results.append(f"[PASS] Air gap (WD−CWL): {ag:.1f} mm ≥ 20 mm")
+    # ── 2. MWL − OF ≤ 20 mm (§5.2.4a) ──────────────────────────────
+    # MWL = highest level during inlet valve malfunction (continuous supply).
+    # Must overflow continuously at 0.28 L/s; MWL is where level stabilises.
+    if p.overflow > 0 and p.mwl_fault > 0:
+        diff = p.mwl_fault - p.overflow
+        if diff <= 20:
+            results.append(f"[PASS] MWL fault: +{diff:.1f} mm above OF ≤ 20 mm")
         else:
-            results.append(f"[FAIL] Air gap (WD−CWL): {ag:.1f} mm < 20 mm")
-        # Also flag if CWL > OF (fault level exceeds overflow — should not happen)
-        if p.overflow > 0 and p.cwl > p.overflow:
-            results.append(f"[WARN] CWL ({p.cwl:.1f}) is above OF ({p.overflow:.1f}) — check calibration")
+            results.append(f"[FAIL] MWL fault: +{diff:.1f} mm above OF > 20 mm")
     else:
-        results.append("[----] Air gap: set Water Discharge & CWL first")
+        results.append("[----] MWL fault: run overflow fault test and press 'Set MWL (fault)'")
 
-    # ── 3. Meniscus < 5 mm above OF ──────────────────────────────────
-    # Capillary rise at the inlet outlet. If water clings > 5 mm above the
-    # water surface the fill valve does not meet EN 14055.
-    if p.meniscus != 0:
-        m = p.meniscus          # = measured_level − OF (should be positive, small)
-        if 0 <= m < 5:
-            results.append(f"[PASS] Meniscus: +{m:.1f} mm above OF < 5 mm")
-        elif m >= 5:
-            results.append(f"[FAIL] Meniscus: +{m:.1f} mm ≥ 5 mm")
-        else:
-            results.append(f"[WARN] Meniscus: {m:.1f} mm (negative — check capture)")
-    else:
-        results.append("[----] Meniscus: capture with 'Set Meniscus' button first")
-
-    # ── 4. CWL vs OF (should be ≤ OF) ────────────────────────────────
+    # ── 3. CWL − OF ≤ 10 mm (§5.2.4b) ───────────────────────────────
+    # CWL = highest level 2 s after supply is cut off during overflow test.
+    # CWL should be at or slightly above OF (overflow draining residual).
     if p.overflow > 0 and p.cwl > 0:
-        diff = p.overflow - p.cwl
-        if diff >= 0:
-            results.append(f"[PASS] CWL {diff:.1f} mm below OF (≤ overflow)")
+        diff = p.cwl - p.overflow   # positive = above OF
+        if diff <= 10:
+            results.append(f"[PASS] CWL: {diff:+.1f} mm from OF ≤ 10 mm")
         else:
-            results.append(f"[FAIL] CWL {abs(diff):.1f} mm ABOVE OF — must set CWL ≤ OF")
+            results.append(f"[FAIL] CWL: +{diff:.1f} mm above OF > 10 mm")
+    else:
+        results.append("[----] CWL: run fault test, cut supply, wait 2s, press 'Set CWL'")
 
-    # ── 5. Residual WL (informational) ────────────────────────────────
+    # ── 4. Meniscus − OF ≤ 5 mm (§5.2.4c) ───────────────────────────
+    # Surface tension holds water just above the overflow lip during overflowing.
+    if p.meniscus != 0:
+        m = p.meniscus          # = measured_level − OF
+        if 0 <= m <= 5:
+            results.append(f"[PASS] Meniscus: +{m:.1f} mm above OF ≤ 5 mm")
+        elif m > 5:
+            results.append(f"[FAIL] Meniscus: +{m:.1f} mm above OF > 5 mm")
+        else:
+            results.append(f"[WARN] Meniscus: {m:.1f} mm (below OF — check capture)")
+    else:
+        results.append("[----] Meniscus: let cistern overflow, stabilise, press 'Set Meniscus'")
+
+    # ── 5. Air gap a: OF − inlet orifice ≥ 20 mm (§5.2.7) ───────────
+    # Prevents backflow into supply pipe. The lowest point of the inlet valve
+    # air orifice must be ≥ 20 mm above overflow level (ruler measurement).
+    results.append("[INFO] Air gap a (§5.2.7): measure OF − inlet valve air orifice ≥ 20 mm "
+                   "(ruler/tape — cannot be measured by pressure sensor)")
+
+    # ── 6. Residual WL (informational) ────────────────────────────────
     if p.residual_wl > 0:
-        flush_vol_est = p.mwl - p.residual_wl if p.mwl > p.residual_wl else 0
-        results.append(f"[INFO] Residual WL: {p.residual_wl:.1f} mm  "
-                       f"(flush drop ≈ {flush_vol_est:.1f} mm)")
+        results.append(f"[INFO] Residual WL (RWL): {p.residual_wl:.1f} mm after flush")
 
-    # ── 6. Flush volume ────────────────────────────────────────────────
+    # ── 7. Flush volume (§5.2.1, §6.5) ────────────────────────────────
     if app.flush_results:
         full = [r for r in app.flush_results if "Full" in r["type"]]
         part = [r for r in app.flush_results if "Part" in r["type"]]
@@ -767,7 +789,8 @@ def _check_compliance():
             results.append(f"[{tag}] Full flush avg: {avg_full:.2f} L (limit 6.0 L)")
             en_rates = [r["en14055_rate"] for r in full if r.get("en14055_rate") is not None]
             if en_rates:
-                results.append(f"[INFO] Full flush EN14055 flow rate: {sum(en_rates)/len(en_rates):.3f} L/s")
+                avg_rate = sum(en_rates) / len(en_rates)
+                results.append(f"[INFO] Full flush EN14055 flow rate (V2 method): {avg_rate:.3f} L/s")
         if part:
             avg_part = sum(r["vol"] for r in part) / len(part)
             tag = "PASS" if avg_part <= 4.0 else "WARN"
@@ -792,46 +815,52 @@ def _check_compliance():
 def _refresh_limits():
     """Refresh all EN 14055 limit labels and status indicators.
 
-    EN 14055 height order (bottom → top):
-      Residual WL  <  MWL  <  CWL ≈ OF  <  WD
+    EN 14055:2015 height order (bottom → top):
+      RWL < NWL < OF < Meniscus (≤+5mm) < CWL (≤+10mm) < MWL_fault (≤+20mm)
 
-    Safety Margin = OF − MWL  (≥ 20 mm)
-    Air Gap       = WD − CWL  (≥ 20 mm, CWL ≈ OF for Type AG)
-    Meniscus      = level − OF (< 5 mm, capillary rise at inlet)
+    §5.2.6  Safety margin c = OF − NWL   ≥ 20 mm
+    §5.2.4a MWL (fault)     − OF         ≤ 20 mm
+    §5.2.4b CWL             − OF         ≤ 10 mm
+    §5.2.4c Meniscus        − OF         ≤  5 mm
+    §5.2.7  Air gap a = OF − inlet orifice ≥ 20 mm  (ruler measurement)
     """
     p = app.profile
     of = p.overflow
 
     def _mm(v):
         return f"{v:.1f} mm"
-    def _mm_of_below(v, label=""):
-        """Format level with its distance below OF."""
+
+    def _mm_rel(v):
+        """Format level with signed distance from OF (+above, −below)."""
         if of > 0 and v > 0:
-            d = of - v   # positive = below OF
+            d = v - of   # positive = above OF
             return f"{v:.1f} mm  ({d:+.1f} mm OF)"
         return f"{v:.1f} mm"
 
-    # MWL: shows distance below OF (safety margin)
-    dpg.set_value("lbl_mwl",     _mm_of_below(p.mwl))
-    # Meniscus: capillary rise above OF  (+ve = above OF)
-    dpg.set_value("lbl_menis",   f"{p.meniscus:+.1f} mm" if p.meniscus != 0 else "0.0 mm")
-    # CWL: fault-fill level, shown with distance below/above OF
-    dpg.set_value("lbl_cwl",     _mm_of_below(p.cwl))
-    dpg.set_value("lbl_wd",      _mm(p.water_discharge))
+    # NWL (stored as p.mwl): normal fill level, should be BELOW OF
+    dpg.set_value("lbl_mwl", _mm_rel(p.mwl))
+    # MWL fault: overflow test max level, should be ABOVE OF by ≤20mm
+    if dpg.does_item_exist("lbl_mwl_fault"):
+        dpg.set_value("lbl_mwl_fault", _mm_rel(p.mwl_fault) if p.mwl_fault > 0 else "—")
+    # Meniscus: delta above OF (+ve = above OF), ≤ 5mm
+    dpg.set_value("lbl_menis", f"{p.meniscus:+.1f} mm" if p.meniscus != 0 else "0.0 mm")
+    # CWL: 2s-after-cutoff level, should be ABOVE OF by ≤10mm
+    dpg.set_value("lbl_cwl", _mm_rel(p.cwl) if p.cwl > 0 else "—")
+    dpg.set_value("lbl_wd",       _mm(p.water_discharge))
     dpg.set_value("lbl_overflow", _mm(of))
-    dpg.set_value("lbl_profile", f"Active Profile: {p.name}")
+    dpg.set_value("lbl_profile",  f"Active Profile: {p.name}")
     if dpg.does_item_exist("lbl_residual"):
         dpg.set_value("lbl_residual", _mm(p.residual_wl))
 
     w = app.app_settings.get("avg_window", 0.5)
-    dpg.set_item_label("btn_mwl",   f"Set MWL  (avg {w}s)")
+    dpg.set_item_label("btn_mwl",   f"Set NWL  (avg {w}s)")
     dpg.set_item_label("btn_menis", f"Set Meniscus (avg {w}s)")
 
     show_manual = app.app_settings.get("cwl_mode") == "Manual" and app.cwl_state == "ARMED"
     if dpg.does_item_exist("btn_manual_rwl"):
         dpg.configure_item("btn_manual_rwl", show=show_manual)
 
-    # ── Safety Margin = OF − MWL ─────────────────────────────────────
+    # ── Safety Margin c = OF − NWL (§5.2.6) ──────────────────────────
     if dpg.does_item_exist("lbl_safety_margin_static"):
         if of > 0 and p.mwl > 0:
             sm = of - p.mwl
@@ -841,17 +870,17 @@ def _refresh_limits():
         else:
             dpg.set_value("lbl_safety_margin_static", "—")
 
-    # ── Air Gap = WD − CWL ───────────────────────────────────────────
-    if p.water_discharge > 0 and p.cwl > 0:
-        airgap = p.water_discharge - p.cwl
-        if airgap >= 20:
-            dpg.set_value("lbl_airgap", f"Airgap OK ({airgap:.1f}mm)")
+    # ── CWL compliance status (§5.2.4b) ─────────────────────────────
+    if of > 0 and p.cwl > 0:
+        diff = p.cwl - of   # positive = CWL above OF (expected)
+        if diff <= 10:
+            dpg.set_value("lbl_airgap", f"CWL: {diff:+.1f} mm OF  ✓ (≤10)")
             _bind_status("lbl_airgap", "theme_green")
         else:
-            dpg.set_value("lbl_airgap", f"Airgap FAIL ({airgap:.1f}<20)")
+            dpg.set_value("lbl_airgap", f"CWL: +{diff:.1f} mm OF  ✗ (>10)")
             _bind_status("lbl_airgap", "theme_red")
     else:
-        dpg.set_value("lbl_airgap", "Airgap: —  set WD & CWL")
+        dpg.set_value("lbl_airgap", "CWL: — (capture during fault test)")
         _bind_status("lbl_airgap", "theme_gray")
 
 def _toggle_log():
@@ -1291,10 +1320,10 @@ def _save_prog():
 # ── Line colors dialog ──────────────────────────────────────────────
 _LINE_COLOR_LABELS = {
     "sensor": "Sensor line",
-    "mwl":    "MWL",
-    "menis":  "Meniscus corr.",
+    "mwl":    "NWL (fill level)",
+    "menis":  "Meniscus",
     "wd":     "Water Discharge",
-    "cwl":    "CWL",
+    "cwl":    "CWL (fault)",
 }
 
 def _open_line_colors_dlg():
@@ -1458,11 +1487,11 @@ def update_ui():
     if dpg.does_item_exist("lbl_f"):
         dpg.set_value("lbl_f", f"{f:.3f} L/s")
 
-    # Safety margin = OF − current height
+    # Live headroom to overflow = OF − current height (live indicator, not EN14055 §5.2.6 "c")
     of = app.profile.overflow
     if dpg.does_item_exist("lbl_safety_margin"):
         if of > 0:
-            sm = of - h
+            sm = of - h   # how far current level is below overflow
             col = COL_GREEN if sm >= 20 else (COL_ORANGE if sm >= 5 else COL_RED)
             dpg.set_value("lbl_safety_margin", f"{sm:.1f} mm")
             dpg.configure_item("lbl_safety_margin", color=col)
@@ -1864,7 +1893,8 @@ with dpg.window(tag="main_win"):
             dpg.add_spacer(height=2)
 
             _avg = app.app_settings.get("avg_window", 0.5)
-            dpg.add_button(label=f"Set MWL  (avg {_avg}s)",
+            # NWL = Nominal Water Level (normal fill, §5.2.6)
+            dpg.add_button(label=f"Set NWL  (avg {_avg}s)",
                            tag="btn_mwl", callback=_set_mwl, width=-1)
             dpg.bind_item_theme("btn_mwl", "theme_btn_action")
 
@@ -1872,15 +1902,19 @@ with dpg.window(tag="main_win"):
                            tag="btn_menis", callback=_set_meniscus, width=-1)
             dpg.bind_item_theme("btn_menis", "theme_btn_action")
 
-            # CWL capture buttons
-            dpg.add_button(label="Set CWL (fault test)", callback=_set_cwl, width=-1)
+            # MWL fault capture (§5.2.4a — overflow fault test max level)
+            dpg.add_button(label="Set MWL (fault — overflow running)", callback=_set_mwl_fault, width=-1)
+            dpg.bind_item_theme(dpg.last_item(), "theme_btn_action")
+
+            # CWL capture buttons (§5.2.4b — 2s after cutoff during fault test)
+            dpg.add_button(label="Set CWL (2s after cutoff)", callback=_set_cwl, width=-1)
             dpg.bind_item_theme(dpg.last_item(), "theme_btn_action")
             dpg.add_button(label="CWL = Overflow", callback=_set_cwl_to_of, width=-1)
             dpg.bind_item_theme(dpg.last_item(), "theme_btn_action")
 
             # Manual RWL timer — only shown in Manual mode
             dpg.add_button(label="Start RWL 2s Timer", tag="btn_manual_rwl",
-                           callback=_manual_cwl, width=-1, show=False)
+                           callback=_manual_rwl, width=-1, show=False)
             dpg.bind_item_theme("btn_manual_rwl", "theme_btn_action")
 
             dpg.add_spacer(height=4)
@@ -1889,35 +1923,38 @@ with dpg.window(tag="main_win"):
             with dpg.group(horizontal=True):
                 # Left column
                 with dpg.group(width=160):
-                    dpg.add_text("MWL:", color=COL_GRAY)
-                    dpg.add_text("0.0 mm", tag="lbl_mwl")
+                    dpg.add_text("NWL (fill):", color=COL_GRAY)
+                    dpg.add_text("—", tag="lbl_mwl")
                     dpg.add_spacer(height=3)
-                    dpg.add_text("CWL:", color=COL_GRAY)
-                    dpg.add_text("0.0 mm", tag="lbl_cwl")
+                    dpg.add_text("MWL (fault):", color=COL_GRAY)
+                    dpg.add_text("—", tag="lbl_mwl_fault")
+                    dpg.add_spacer(height=3)
+                    dpg.add_text("CWL (2s):", color=COL_GRAY)
+                    dpg.add_text("—", tag="lbl_cwl")
                     dpg.add_spacer(height=3)
                     dpg.add_text("Residual WL:", color=COL_GRAY)
                     dpg.add_text("0.0 mm", tag="lbl_residual")
-                    dpg.add_spacer(height=3)
-                    dpg.add_text("Safety Margin:", color=COL_GRAY)
-                    dpg.add_text("— mm", tag="lbl_safety_margin")
 
                 # Right column
                 with dpg.group():
                     dpg.add_text("Meniscus:", color=COL_GRAY)
                     dpg.add_text("0.0 mm", tag="lbl_menis")
                     dpg.add_spacer(height=3)
-                    dpg.add_text("Water Disch.:", color=COL_GRAY)
-                    dpg.add_text("0.0 mm", tag="lbl_wd", color=COL_GRAY)
-                    dpg.add_spacer(height=3)
                     dpg.add_text("Overflow:", color=COL_GRAY)
                     dpg.add_text("0.0 mm", tag="lbl_overflow", color=COL_GRAY)
+                    dpg.add_spacer(height=3)
+                    dpg.add_text("Safety margin c:", color=COL_GRAY)
+                    dpg.add_text("—", tag="lbl_safety_margin_static")
+                    dpg.add_spacer(height=3)
+                    dpg.add_text("Live headroom:", color=COL_GRAY)
+                    dpg.add_text("— mm", tag="lbl_safety_margin")
 
             dpg.add_spacer(height=6)
 
             # Status indicators
-            dpg.add_text("Airgap: —", tag="lbl_airgap")
+            dpg.add_text("CWL: — (capture during fault test)", tag="lbl_airgap")
             _bind_status("lbl_airgap", "theme_gray")
-            dpg.add_text("CWL: IDLE", tag="lbl_cwl_st")
+            dpg.add_text("RWL: IDLE", tag="lbl_cwl_st")
             _bind_status("lbl_cwl_st", "theme_gray")
 
             dpg.add_spacer(height=8)
@@ -1999,15 +2036,15 @@ with dpg.window(tag="main_win"):
                 dpg.add_plot_axis(dpg.mvXAxis, label="Time (s)", tag="x_axis")
                 with dpg.plot_axis(dpg.mvYAxis, label="Height (mm)", tag="y_axis"):
                     dpg.add_line_series([], [], tag="line_main",  label="Sensor")
-                    dpg.add_line_series([], [], tag="line_mwl",   label="MWL",          show=False)
-                    dpg.add_line_series([], [], tag="line_menis", label="Meniscus corr", show=False)
+                    dpg.add_line_series([], [], tag="line_mwl",   label="NWL",           show=False)
+                    dpg.add_line_series([], [], tag="line_menis", label="Meniscus",       show=False)
                     dpg.add_line_series([], [], tag="line_wd",    label="Water Disch.",  show=False)
-                    dpg.add_line_series([], [], tag="line_cwl",   label="CWL",           show=False)
+                    dpg.add_line_series([], [], tag="line_cwl",   label="CWL (fault)",   show=False)
                     dpg.add_scatter_series([], [], tag="scatter_click1", label="")
                     dpg.add_scatter_series([], [], tag="scatter_click2", label="")
 
                 # Drag lines — shown only during pause in height mode
-                dpg.add_drag_line(label="MWL [drag]", tag="drag_mwl",
+                dpg.add_drag_line(label="NWL [drag]", tag="drag_mwl",
                                   color=[100, 160, 255, 200],
                                   default_value=0.0, vertical=False, show=False,
                                   callback=_on_drag_mwl)
@@ -2094,8 +2131,9 @@ if _font_medium:
     dpg.bind_item_font("lbl_p", _font_medium)
     dpg.bind_item_font("lbl_f", _font_medium)
     # Limit value labels — slightly larger for readability
-    for _tag in ("lbl_mwl", "lbl_cwl", "lbl_menis", "lbl_wd",
-                 "lbl_overflow", "lbl_residual", "lbl_safety_margin"):
+    for _tag in ("lbl_mwl", "lbl_mwl_fault", "lbl_cwl", "lbl_menis",
+                 "lbl_overflow", "lbl_residual", "lbl_safety_margin",
+                 "lbl_safety_margin_static"):
         dpg.bind_item_font(_tag, _font_medium)
 
 with dpg.handler_registry():
