@@ -125,16 +125,19 @@ class CisternProfile:
         self.points = []
         self.mwl = 0.0
         self.meniscus = 0.0
-        self.cwl = 0.0
+        self.cwl = 0.0          # Critical Water Level = fault fill level ≈ OF
         self.overflow = 0.0
         self.water_discharge = 0.0
+        self.residual_wl = 0.0  # Residual Water Level = minimum after flush
 
     def to_dict(self):
         return {k: getattr(self, k) for k in
-                ["name", "points", "mwl", "meniscus", "cwl", "overflow", "water_discharge"]}
+                ["name", "points", "mwl", "meniscus", "cwl", "overflow",
+                 "water_discharge", "residual_wl"]}
 
     def from_dict(self, d):
-        for k in ["name", "points", "mwl", "meniscus", "cwl", "overflow", "water_discharge"]:
+        for k in ["name", "points", "mwl", "meniscus", "cwl", "overflow",
+                  "water_discharge", "residual_wl"]:
             if k in d:
                 setattr(self, k, d[k])
 
@@ -469,9 +472,12 @@ class SensorApp:
                 self.current_height = h
                 self.current_volume = v
 
-    def tick_cwl(self, h: float, h_history: list) -> bool:
-        """Advance CWL state machine. Returns True when state just became DONE
-        (caller should call _refresh_limits to update the UI limit display)."""
+    def tick_rwl(self, h: float, h_history: list) -> bool:
+        """Detect Residual Water Level — the minimum height after a flush.
+        EN 14055: RWL is what remains in the cistern after a complete flush.
+        Armed when MWL is captured. Detects a significant drop then waits 2 s
+        for the level to stabilise before storing the minimum as residual_wl.
+        Returns True when detection is complete (caller should refresh limits)."""
         if self.cwl_state == "ARMED":
             if self.app_settings.get("cwl_mode") == "Automatic":
                 alg = self.app_settings.get("cwl_smooth", "None")
@@ -485,7 +491,7 @@ class SensorApp:
                     self.cwl_timer = time.time()
         elif self.cwl_state == "WAITING":
             if time.time() - self.cwl_timer >= 2.0:
-                self.profile.cwl = self.get_avg_height()
+                self.profile.residual_wl = self.get_avg_height()  # RWL = flush minimum
                 self.cwl_state = "DONE"
                 return True
         return False
@@ -538,24 +544,46 @@ def _toggle_connect():
             _bind_status("lbl_conn", "theme_red")
 
 def _set_mwl():
+    """Capture MWL — normal fill level where valve closes.
+    EN 14055: OF − MWL must be ≥ 20 mm (safety margin)."""
     val = app.get_avg_height()
     app.profile.mwl = val
+    # Arm RWL (Residual WL) detection — will fire after next flush drop
     app.cwl_state = "ARMED"
     app.cwl_peak = val
     _refresh_limits()
 
-def _set_meniscus():
-    """Meniscus level = measured WL − overflow height (EN 14055)."""
+def _set_cwl():
+    """Capture CWL manually — used during fault simulation (valve stuck open).
+    EN 14055: CWL = highest water level under fault conditions, typically ≈ OF.
+    Air Gap = WD − CWL must be ≥ 20 mm."""
+    app.profile.cwl = app.get_avg_height()
+    _refresh_limits()
+
+def _set_cwl_to_of():
+    """Set CWL = Overflow level (standard Type AG configuration).
+    For most WC cisterns CWL = OF; the air gap = WD − OF."""
     if app.profile.overflow <= 0:
-        # Show a non-blocking warning in the status label temporarily
-        dpg.set_value("lbl_cwl_st", "⚠ Set Overflow in Calibration first!")
-        _bind_status("lbl_cwl_st", "theme_orange")
+        _show_toast("⚠ Set Overflow level in Calibration first!")
+        return
+    app.profile.cwl = app.profile.overflow
+    _refresh_limits()
+    _show_toast("CWL set to Overflow level")
+
+def _set_meniscus():
+    """Capture meniscus — capillary rise at the inlet above the water surface.
+    EN 14055: Meniscus = measured_level − OF.  Must be < 5 mm.
+    Procedure: fill cistern to the point where water just touches the inlet tube
+    and press this button."""
+    if app.profile.overflow <= 0:
+        _show_toast("⚠ Set Overflow level in Calibration first!")
         return
     measured_level = app.get_avg_height()
     app.profile.meniscus = measured_level - app.profile.overflow
     _refresh_limits()
 
-def _manual_cwl():
+def _manual_rwl():
+    """Manually trigger RWL 2-second timer (Manual mode)."""
     if app.cwl_state == "ARMED":
         app.cwl_state = "WAITING"
         app.cwl_timer = time.time()
@@ -663,65 +691,87 @@ def _clear_flush():
     _refresh_flush_table()
 
 def _check_compliance():
-    """Run EN 14055 compliance checks and show results."""
+    """Run EN 14055 compliance checks.
+
+    EN 14055 height order (bottom → top):
+      Residual WL  <  MWL  <  CWL ≈ OF  <  WD
+
+    Key requirements:
+      Safety Margin = OF − MWL  ≥ 20 mm
+      Air Gap       = WD − CWL  ≥ 20 mm  (CWL ≈ OF for Type AG)
+      Meniscus      = level − OF < 5 mm
+    """
     p = app.profile
     results = []
 
-    # 1. MWL: must be < 20mm below overflow (OF - MWL < 20mm)
+    # ── 1. Safety Margin: OF − MWL ≥ 20 mm ───────────────────────────
+    # Ensures cistern does not overflow under normal fill conditions.
     if p.overflow > 0 and p.mwl > 0:
-        dist_mwl = p.overflow - p.mwl
-        if 0 <= dist_mwl < 20:
-            results.append(f"[PASS] MWL from OF: {dist_mwl:.1f}mm < 20mm")
-        elif dist_mwl >= 20:
-            results.append(f"[FAIL] MWL from OF: {dist_mwl:.1f}mm >= 20mm (too far below OF)")
+        sm = p.overflow - p.mwl
+        if sm >= 20:
+            results.append(f"[PASS] Safety margin (OF−MWL): {sm:.1f} mm ≥ 20 mm")
         else:
-            results.append(f"[FAIL] MWL above overflow! ({dist_mwl:.1f}mm)")
+            results.append(f"[FAIL] Safety margin (OF−MWL): {sm:.1f} mm < 20 mm")
     else:
-        results.append("[----] MWL/Overflow: set both in Calibration first")
+        results.append("[----] Safety margin: capture MWL and set Overflow first")
 
-    # 2. CWL: must be < 10mm below overflow (OF - CWL < 10mm)
-    if p.overflow > 0 and p.cwl > 0:
-        dist_cwl = p.overflow - p.cwl
-        if 0 <= dist_cwl < 10:
-            results.append(f"[PASS] CWL from OF: {dist_cwl:.1f}mm < 10mm")
-        else:
-            results.append(f"[FAIL] CWL from OF: {dist_cwl:.1f}mm >= 10mm")
-    else:
-        results.append("[----] CWL/Overflow: set both in Calibration first")
-
-    # 3. Meniscus: |meniscus| < 5mm from OF
-    if p.overflow > 0 and p.meniscus != 0:
-        dist_menis = abs(p.meniscus)
-        if dist_menis < 5:
-            results.append(f"[PASS] Meniscus from OF: {dist_menis:.1f}mm < 5mm")
-        else:
-            results.append(f"[FAIL] Meniscus from OF: {dist_menis:.1f}mm >= 5mm")
-    else:
-        results.append("[----] Meniscus: capture meniscus level first")
-
-    # 4. Air gap: water_discharge - CWL >= 20mm
+    # ── 2. Air Gap: WD − CWL ≥ 20 mm ────────────────────────────────
+    # CWL = fault-condition fill level ≈ OF (Type AG). Prevents backflow.
     if p.water_discharge > 0 and p.cwl > 0:
-        air_gap = p.water_discharge - p.cwl
-        if air_gap >= 20:
-            results.append(f"[PASS] Air gap (WD-CWL): {air_gap:.1f}mm >= 20mm")
+        ag = p.water_discharge - p.cwl
+        if ag >= 20:
+            results.append(f"[PASS] Air gap (WD−CWL): {ag:.1f} mm ≥ 20 mm")
         else:
-            results.append(f"[FAIL] Air gap (WD-CWL): {air_gap:.1f}mm < 20mm")
+            results.append(f"[FAIL] Air gap (WD−CWL): {ag:.1f} mm < 20 mm")
+        # Also flag if CWL > OF (fault level exceeds overflow — should not happen)
+        if p.overflow > 0 and p.cwl > p.overflow:
+            results.append(f"[WARN] CWL ({p.cwl:.1f}) is above OF ({p.overflow:.1f}) — check calibration")
     else:
-        results.append("[----] Air gap: set Water Disch. & CWL first")
+        results.append("[----] Air gap: set Water Discharge & CWL first")
 
-    # 5. Flush volume by type
+    # ── 3. Meniscus < 5 mm above OF ──────────────────────────────────
+    # Capillary rise at the inlet outlet. If water clings > 5 mm above the
+    # water surface the fill valve does not meet EN 14055.
+    if p.meniscus != 0:
+        m = p.meniscus          # = measured_level − OF (should be positive, small)
+        if 0 <= m < 5:
+            results.append(f"[PASS] Meniscus: +{m:.1f} mm above OF < 5 mm")
+        elif m >= 5:
+            results.append(f"[FAIL] Meniscus: +{m:.1f} mm ≥ 5 mm")
+        else:
+            results.append(f"[WARN] Meniscus: {m:.1f} mm (negative — check capture)")
+    else:
+        results.append("[----] Meniscus: capture with 'Set Meniscus' button first")
+
+    # ── 4. CWL vs OF (should be ≤ OF) ────────────────────────────────
+    if p.overflow > 0 and p.cwl > 0:
+        diff = p.overflow - p.cwl
+        if diff >= 0:
+            results.append(f"[PASS] CWL {diff:.1f} mm below OF (≤ overflow)")
+        else:
+            results.append(f"[FAIL] CWL {abs(diff):.1f} mm ABOVE OF — must set CWL ≤ OF")
+
+    # ── 5. Residual WL (informational) ────────────────────────────────
+    if p.residual_wl > 0:
+        flush_vol_est = p.mwl - p.residual_wl if p.mwl > p.residual_wl else 0
+        results.append(f"[INFO] Residual WL: {p.residual_wl:.1f} mm  "
+                       f"(flush drop ≈ {flush_vol_est:.1f} mm)")
+
+    # ── 6. Flush volume ────────────────────────────────────────────────
     if app.flush_results:
         full = [r for r in app.flush_results if "Full" in r["type"]]
         part = [r for r in app.flush_results if "Part" in r["type"]]
         if full:
             avg_full = sum(r["vol"] for r in full) / len(full)
-            results.append(f"[{'PASS' if avg_full <= 6.0 else 'WARN'}] Full flush avg: {avg_full:.2f}L (limit 6.0L)")
+            tag = "PASS" if avg_full <= 6.0 else "WARN"
+            results.append(f"[{tag}] Full flush avg: {avg_full:.2f} L (limit 6.0 L)")
             en_rates = [r["en14055_rate"] for r in full if r.get("en14055_rate") is not None]
             if en_rates:
-                results.append(f"[INFO] Full EN14055 flow rate avg: {sum(en_rates)/len(en_rates):.3f} L/s")
+                results.append(f"[INFO] Full flush EN14055 flow rate: {sum(en_rates)/len(en_rates):.3f} L/s")
         if part:
             avg_part = sum(r["vol"] for r in part) / len(part)
-            results.append(f"[{'PASS' if avg_part <= 4.0 else 'WARN'}] Part flush avg: {avg_part:.2f}L (limit 4.0L)")
+            tag = "PASS" if avg_part <= 4.0 else "WARN"
+            results.append(f"[{tag}] Part flush avg: {avg_part:.2f} L (limit 4.0 L)")
     else:
         results.append("[----] Flush volume: no measurements yet")
 
@@ -729,55 +779,79 @@ def _check_compliance():
     if dpg.does_item_exist("dlg_comply"):
         dpg.delete_item("dlg_comply")
     with dpg.window(label="EN 14055 Compliance Check", modal=True, tag="dlg_comply",
-                     width=500, height=360, no_resize=True, pos=[350, 220]):
+                     width=520, height=400, no_resize=True, pos=[340, 200]):
         for line in results:
-            col = (COL_GREEN if "[PASS]" in line else
-                   COL_RED   if "[FAIL]" in line else
+            col = (COL_GREEN  if "[PASS]" in line else
+                   COL_RED    if "[FAIL]" in line else
                    COL_ORANGE if "[WARN]" in line else COL_GRAY)
             dpg.add_text(line, color=col)
         dpg.add_separator()
-        dpg.add_button(label="Close", width=120, callback=lambda: dpg.delete_item("dlg_comply"))
+        dpg.add_button(label="Close", width=120,
+                       callback=lambda: dpg.delete_item("dlg_comply"))
 
 def _refresh_limits():
+    """Refresh all EN 14055 limit labels and status indicators.
+
+    EN 14055 height order (bottom → top):
+      Residual WL  <  MWL  <  CWL ≈ OF  <  WD
+
+    Safety Margin = OF − MWL  (≥ 20 mm)
+    Air Gap       = WD − CWL  (≥ 20 mm, CWL ≈ OF for Type AG)
+    Meniscus      = level − OF (< 5 mm, capillary rise at inlet)
+    """
     p = app.profile
     of = p.overflow
 
-    # Format with from-OF distance where relevant
     def _mm(v):
         return f"{v:.1f} mm"
-    def _mm_of(v):
+    def _mm_of_below(v, label=""):
+        """Format level with its distance below OF."""
         if of > 0 and v > 0:
-            d = of - v
-            return f"{v:.1f} mm  ({d:+.1f} OF)"
+            d = of - v   # positive = below OF
+            return f"{v:.1f} mm  ({d:+.1f} mm OF)"
         return f"{v:.1f} mm"
 
-    dpg.set_value("lbl_mwl",     _mm_of(p.mwl))
-    dpg.set_value("lbl_menis",   _mm(p.meniscus))
-    dpg.set_value("lbl_cwl",     _mm_of(p.cwl))
+    # MWL: shows distance below OF (safety margin)
+    dpg.set_value("lbl_mwl",     _mm_of_below(p.mwl))
+    # Meniscus: capillary rise above OF  (+ve = above OF)
+    dpg.set_value("lbl_menis",   f"{p.meniscus:+.1f} mm" if p.meniscus != 0 else "0.0 mm")
+    # CWL: fault-fill level, shown with distance below/above OF
+    dpg.set_value("lbl_cwl",     _mm_of_below(p.cwl))
     dpg.set_value("lbl_wd",      _mm(p.water_discharge))
     dpg.set_value("lbl_overflow", _mm(of))
     dpg.set_value("lbl_profile", f"Active Profile: {p.name}")
     if dpg.does_item_exist("lbl_residual"):
-        dpg.set_value("lbl_residual", _mm(p.cwl))
+        dpg.set_value("lbl_residual", _mm(p.residual_wl))
 
     w = app.app_settings.get("avg_window", 0.5)
     dpg.set_item_label("btn_mwl",   f"Set MWL  (avg {w}s)")
     dpg.set_item_label("btn_menis", f"Set Meniscus (avg {w}s)")
 
     show_manual = app.app_settings.get("cwl_mode") == "Manual" and app.cwl_state == "ARMED"
-    dpg.configure_item("btn_manual_cwl", show=show_manual)
+    if dpg.does_item_exist("btn_manual_rwl"):
+        dpg.configure_item("btn_manual_rwl", show=show_manual)
 
-    # Airgap = WD − CWL
+    # ── Safety Margin = OF − MWL ─────────────────────────────────────
+    if dpg.does_item_exist("lbl_safety_margin_static"):
+        if of > 0 and p.mwl > 0:
+            sm = of - p.mwl
+            col = COL_GREEN if sm >= 20 else COL_RED
+            dpg.set_value("lbl_safety_margin_static", f"{sm:.1f} mm")
+            dpg.configure_item("lbl_safety_margin_static", color=col)
+        else:
+            dpg.set_value("lbl_safety_margin_static", "—")
+
+    # ── Air Gap = WD − CWL ───────────────────────────────────────────
     if p.water_discharge > 0 and p.cwl > 0:
         airgap = p.water_discharge - p.cwl
         if airgap >= 20:
-            dpg.set_value("lbl_airgap", f"Airgap: OK  ({airgap:.1f}mm)")
+            dpg.set_value("lbl_airgap", f"Airgap OK ({airgap:.1f}mm)")
             _bind_status("lbl_airgap", "theme_green")
         else:
-            dpg.set_value("lbl_airgap", f"Airgap: FAIL ({airgap:.1f}mm < 20)")
+            dpg.set_value("lbl_airgap", f"Airgap FAIL ({airgap:.1f}<20)")
             _bind_status("lbl_airgap", "theme_red")
     else:
-        dpg.set_value("lbl_airgap", "Airgap: —")
+        dpg.set_value("lbl_airgap", "Airgap: —  set WD & CWL")
         _bind_status("lbl_airgap", "theme_gray")
 
 def _toggle_log():
@@ -1395,25 +1469,23 @@ def update_ui():
         else:
             dpg.set_value("lbl_safety_margin", "— mm")
 
-    # Connection status icon is updated on connect/disconnect events, not every frame
-
-    # CWL status label — state transitions happen in app.tick_cwl (called from frame_callback)
+    # RWL detection state label (auto-detects Residual WL after flush)
     thresh = app.app_settings.get("cwl_drop_thresh", 1.5)
     if app.cwl_state == "ARMED":
         if app.app_settings.get("cwl_mode") == "Automatic":
-            dpg.set_value("lbl_cwl_st", f"CWL: ARMED (drop >= {thresh}mm)")
+            dpg.set_value("lbl_cwl_st", f"RWL: ARMED (drop ≥ {thresh}mm)")
         else:
-            dpg.set_value("lbl_cwl_st", "CWL: ARMED (Manual)")
+            dpg.set_value("lbl_cwl_st", "RWL: ARMED (Manual)")
         _bind_status("lbl_cwl_st", "theme_blue")
     elif app.cwl_state == "WAITING":
         rem = max(0.0, 2.0 - (time.time() - app.cwl_timer))
-        dpg.set_value("lbl_cwl_st", f"CWL: TIMER {rem:.1f}s")
+        dpg.set_value("lbl_cwl_st", f"RWL: TIMER {rem:.1f}s")
         _bind_status("lbl_cwl_st", "theme_orange")
     elif app.cwl_state == "DONE":
-        dpg.set_value("lbl_cwl_st", "CWL: CAPTURED")
+        dpg.set_value("lbl_cwl_st", f"RWL: {app.profile.residual_wl:.1f}mm captured")
         _bind_status("lbl_cwl_st", "theme_green")
     else:
-        dpg.set_value("lbl_cwl_st", "CWL: IDLE")
+        dpg.set_value("lbl_cwl_st", "RWL: IDLE (set MWL to arm)")
         _bind_status("lbl_cwl_st", "theme_gray")
 
 def update_chart():
@@ -1467,8 +1539,15 @@ def update_chart():
         x0, x1 = t_data[0], t_data[-1]
         if x1 - x0 < 1:
             x1 = x0 + 1
-        for tag, val in [("line_mwl", app.profile.mwl), ("line_menis", app.profile.meniscus),
-                         ("line_wd", app.profile.water_discharge), ("line_cwl", app.profile.cwl)]:
+        # MWL, CWL, OF (overflow), WD limit lines
+        # meniscus is OF+correction — show as absolute height: OF + meniscus
+        menis_abs = app.profile.overflow + app.profile.meniscus if app.profile.overflow > 0 else 0
+        for tag, val in [
+            ("line_mwl",   app.profile.mwl),
+            ("line_menis", menis_abs),
+            ("line_wd",    app.profile.water_discharge),
+            ("line_cwl",   app.profile.cwl),
+        ]:
             if val > 0:
                 dpg.set_value(tag, [[x0, x1], [val, val]])
                 dpg.configure_item(tag, show=True)
@@ -1526,7 +1605,7 @@ def frame_callback():
         with app.data_lock:
             h = app.current_height
             h_history = list(app.h_buf)[-150:] if app.h_buf else [h]
-        if app.tick_cwl(h, h_history):
+        if app.tick_rwl(h, h_history):
             _refresh_limits()
         _tick_flush_auto_stop(h, now)
         update_ui()
@@ -1793,10 +1872,16 @@ with dpg.window(tag="main_win"):
                            tag="btn_menis", callback=_set_meniscus, width=-1)
             dpg.bind_item_theme("btn_menis", "theme_btn_action")
 
-            # Manual CWL timer — only shown in Manual mode
-            dpg.add_button(label="Start CWL 2s Timer", tag="btn_manual_cwl",
+            # CWL capture buttons
+            dpg.add_button(label="Set CWL (fault test)", callback=_set_cwl, width=-1)
+            dpg.bind_item_theme(dpg.last_item(), "theme_btn_action")
+            dpg.add_button(label="CWL = Overflow", callback=_set_cwl_to_of, width=-1)
+            dpg.bind_item_theme(dpg.last_item(), "theme_btn_action")
+
+            # Manual RWL timer — only shown in Manual mode
+            dpg.add_button(label="Start RWL 2s Timer", tag="btn_manual_rwl",
                            callback=_manual_cwl, width=-1, show=False)
-            dpg.bind_item_theme("btn_manual_cwl", "theme_btn_action")
+            dpg.bind_item_theme("btn_manual_rwl", "theme_btn_action")
 
             dpg.add_spacer(height=4)
 
