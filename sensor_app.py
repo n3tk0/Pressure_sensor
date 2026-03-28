@@ -257,7 +257,7 @@ _interp_expected_version = -1  # checked in interp_hv
 _interp_lock = threading.Lock()
 
 # EN-06: per-session air gap manual confirmation (not saved; resets on restart)
-_air_gap_confirmed = [False]  # list so closure in dialog callback can mutate it
+_air_gap_confirmed = {"value": False}  # dict for mutable state in closure
 
 def _rebuild_interp_cache(pts):
     """Pre-sort calibration points once. Call on profile load/save/edit."""
