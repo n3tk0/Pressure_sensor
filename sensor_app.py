@@ -454,7 +454,7 @@ class SensorApp:
                                                 # Positive = outflow (volume decreasing).
                                                 # Negate to match the intuitive convention
                                                 # (positive = inflow / refill).
-                                                f_rate = (self.v_buf[-5] - v) / dt
+                                                f_rate = (v - self.v_buf[-5]) / dt
                                         self.current_pressure = p_bar
                                         self.current_height = h
                                         self.current_volume = v
