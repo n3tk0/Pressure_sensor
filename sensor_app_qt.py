@@ -46,97 +46,242 @@ _air_gap_confirmed: list[bool] = [False]
 
 
 # ── QSS themes ───────────────────────────────────────────────────────────────
+# Design: Fluent-inspired deep navy glass cards
+#   bg0 #0b0b18  surface #131325  card #1a1a2e  border #262650
+#   accent #7c6ef4  green #4ade80  red #f87171  orange #fb923c
 
 _QSS_DARK = """
-QMainWindow, QWidget#central { background: #1e1e2e; color: #cdd6f4; }
-QWidget { background: #1e1e2e; color: #cdd6f4; font-size: 13px; }
-QMenuBar { background: #232336; color: #cdd6f4; }
-QMenuBar::item:selected { background: #313347; }
-QMenu { background: #2a2a3d; color: #cdd6f4; border: 1px solid #45475a; }
-QMenu::item:selected { background: #313347; }
+* { font-family: 'Segoe UI', 'Inter', 'SF Pro Display', sans-serif; font-size: 13px; }
+
+QMainWindow { background: #0b0b18; }
+QWidget#central { background: #0b0b18; color: #e2e8f0; }
+QWidget { background: #0b0b18; color: #e2e8f0; }
+
+/* ── Menu bar ── */
+QMenuBar { background: #0f0f20; color: #94a3b8; border-bottom: 1px solid #1e1e40; padding: 2px 0; }
+QMenuBar::item { padding: 4px 14px; border-radius: 4px; }
+QMenuBar::item:selected { background: #1e1e3c; color: #e2e8f0; }
+QMenu { background: #131325; color: #e2e8f0; border: 1px solid #2a2a50; border-radius: 8px; padding: 4px; }
+QMenu::item { padding: 6px 20px 6px 12px; border-radius: 5px; }
+QMenu::item:selected { background: #1e1e3c; }
+QMenu::separator { height: 1px; background: #1e1e40; margin: 4px 8px; }
+
+/* ── Card containers (QGroupBox used as card) ── */
 QGroupBox {
-    border: 1px solid #45475a; border-radius: 6px;
-    margin-top: 8px; padding-top: 4px; color: #89b4fa;
+    background: #131325;
+    border: 1px solid #252545;
+    border-radius: 12px;
+    margin-top: 16px;
+    padding: 12px 10px 10px 10px;
+    color: #7c6ef4;
+    font-size: 11px;
+    font-weight: bold;
+    letter-spacing: 1.5px;
 }
-QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 14px; top: 2px;
+    padding: 0 6px;
+    background: #131325;
+    color: #7c6ef4;
+}
+
+/* ── Buttons ── */
 QPushButton {
-    background: #313347; color: #cdd6f4; border: none;
-    border-radius: 5px; padding: 4px 10px;
+    background: #1e1e3c;
+    color: #c4c9e8;
+    border: 1px solid #2a2a52;
+    border-radius: 8px;
+    padding: 6px 14px;
+    min-height: 30px;
 }
-QPushButton:hover { background: #3f3f5a; }
-QPushButton:pressed { background: #4a4a6a; }
-QPushButton#action { background: #285a5a; color: #f0f0f0; }
-QPushButton#action:hover { background: #357373; }
-QPushButton#danger { background: #642832; color: #f0f0f0; }
-QPushButton#danger:hover { background: #823741; }
-QPushButton#success { background: #235a37; color: #f0f0f0; }
-QPushButton#success:hover { background: #2e7346; }
+QPushButton:hover   { background: #252550; border-color: #3a3a70; color: #e2e8f0; }
+QPushButton:pressed { background: #1a1a44; }
+
+/* Variant: action (teal-violet) */
+QPushButton#action  { background: #1e2a5c; border-color: #2d3d80; color: #a5b4fc; }
+QPushButton#action:hover  { background: #253472; border-color: #7c6ef4; color: #e2e8f0; }
+QPushButton#action:pressed { background: #1a2450; }
+
+/* Variant: danger (deep red) */
+QPushButton#danger  { background: #3d1522; border-color: #6b2035; color: #fca5a5; }
+QPushButton#danger:hover  { background: #4f1c2d; border-color: #f87171; color: #fecaca; }
+
+/* Variant: success (deep green) */
+QPushButton#success { background: #14321e; border-color: #1e5430; color: #86efac; }
+QPushButton#success:hover  { background: #1a3f26; border-color: #4ade80; color: #bbf7d0; }
+
+/* Collapse button */
+QPushButton#btn_collapse {
+    background: transparent; border: 1px solid #252545; border-radius: 6px;
+    color: #4a5568; padding: 2px; min-height: 24px;
+}
+QPushButton#btn_collapse:hover { background: #1a1a30; color: #94a3b8; }
+
+/* Connect button — state-aware via objectName switching */
+QPushButton#btn_connect         { background: #1c1850; border-color: #2e2a80; color: #a5b4fc; min-height: 32px; }
+QPushButton#btn_connect:hover   { background: #232070; border-color: #7c6ef4; }
+
+/* ── Combo boxes ── */
 QComboBox {
-    background: #313347; color: #cdd6f4; border: 1px solid #45475a;
-    border-radius: 4px; padding: 2px 8px;
+    background: #161630; color: #c4c9e8;
+    border: 1px solid #252545; border-radius: 7px;
+    padding: 4px 28px 4px 10px; min-height: 28px;
 }
-QComboBox QAbstractItemView { background: #2a2a3d; color: #cdd6f4; }
-QLabel#lbl_h  { color: #89b4fa; font-size: 20px; font-weight: bold; }
-QLabel#lbl_v  { color: #a6e3a1; font-size: 18px; }
-QLabel#lbl_p  { color: #888; }
-QLabel#lbl_f  { color: #fab45a; }
-QLabel#lbl_temp { color: #888; }
-QLabel.section_hdr { color: #89b4fa; font-weight: bold; }
-QLabel.green  { color: #a6e3a1; }
-QLabel.red    { color: #f38ba8; }
-QLabel.orange { color: #fab45a; }
-QLabel.blue   { color: #89b4fa; }
-QLabel.gray   { color: #888; }
-QFrame[frameShape="4"], QFrame[frameShape="5"] { color: #45475a; }
-QScrollBar:vertical { background: #232336; width: 10px; }
-QScrollBar::handle:vertical { background: #45475a; border-radius: 4px; }
-QStatusBar { background: #232336; color: #888; }
+QComboBox:hover { border-color: #3a3a70; }
+QComboBox::drop-down { border: none; width: 20px; }
+QComboBox::down-arrow { image: none; width: 0; height: 0;
+    border-left: 4px solid transparent; border-right: 4px solid transparent;
+    border-top: 5px solid #7c6ef4; margin-right: 8px; }
+QComboBox QAbstractItemView {
+    background: #131325; color: #e2e8f0;
+    border: 1px solid #252545; border-radius: 8px;
+    selection-background-color: #1e1e3c;
+    outline: none;
+}
+
+/* ── CheckBox ── */
+QCheckBox { color: #94a3b8; spacing: 8px; }
+QCheckBox::indicator { width: 16px; height: 16px; border: 1px solid #3a3a70; border-radius: 4px; background: #161630; }
+QCheckBox::indicator:checked { background: #7c6ef4; border-color: #7c6ef4; }
+QCheckBox::indicator:hover { border-color: #7c6ef4; }
+
+/* ── Live readout labels ── */
+QLabel#lbl_h    { color: #7c6ef4; font-size: 26px; font-weight: bold; font-family: 'Consolas','JetBrains Mono','monospace'; }
+QLabel#lbl_v    { color: #4ade80; font-size: 20px; font-family: 'Consolas','monospace'; }
+QLabel#lbl_p    { color: #64748b; font-family: 'Consolas','monospace'; }
+QLabel#lbl_f    { color: #fb923c; font-family: 'Consolas','monospace'; }
+QLabel#lbl_temp { color: #64748b; font-family: 'Consolas','monospace'; }
+QLabel#lbl_profile { color: #64748b; }
+QLabel#lbl_conn    { color: #64748b; }
+QLabel#lbl_conn_icon { font-size: 10px; }
+
+/* ── Limit value labels ── */
+QLabel.limit_val { color: #94a3b8; font-family: 'Consolas','monospace'; font-size: 12px; }
+QLabel.limit_key { color: #4a5568; font-size: 11px; }
+
+/* ── Status colour classes ── */
+QLabel.green  { color: #4ade80; }
+QLabel.red    { color: #f87171; }
+QLabel.orange { color: #fb923c; }
+QLabel.blue   { color: #7c6ef4; }
+QLabel.gray, QLabel.muted { color: #4a5568; }
+QLabel.status { font-size: 12px; }
+
+/* ── Scroll bars ── */
+QScrollBar:vertical { background: #0f0f20; width: 8px; border-radius: 4px; }
+QScrollBar::handle:vertical { background: #252545; border-radius: 4px; min-height: 20px; }
+QScrollBar::handle:vertical:hover { background: #3a3a70; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QScrollBar:horizontal { background: #0f0f20; height: 8px; }
+QScrollBar::handle:horizontal { background: #252545; border-radius: 4px; }
+
+/* ── Separator ── */
+QFrame[frameShape="4"], QFrame[frameShape="5"] { color: #1e1e40; }
+
+/* ── Status bar ── */
+QStatusBar { background: #0f0f20; color: #4a5568; border-top: 1px solid #1e1e40; }
+QStatusBar QLabel { color: #4a5568; }
+
+/* ── Scroll area ── */
+QScrollArea { border: none; background: transparent; }
+QScrollArea > QWidget > QWidget { background: transparent; }
+
+/* ── Top bar card ── */
+QWidget#top_bar {
+    background: #0f0f20;
+    border: 1px solid #1e1e40;
+    border-radius: 10px;
+}
+
+/* ── Chart toolbar card ── */
+QWidget#chart_toolbar {
+    background: #0f0f20;
+    border: 1px solid #1e1e40;
+    border-radius: 10px;
+}
 """
 
 _QSS_LIGHT = """
-QMainWindow, QWidget#central { background: #eff1f5; color: #4c4f69; }
-QWidget { background: #eff1f5; color: #4c4f69; font-size: 13px; }
-QMenuBar { background: #d2d7e4; color: #4c4f69; }
-QMenuBar::item:selected { background: #bec4d6; }
-QMenu { background: #e6e9f0; color: #4c4f69; border: 1px solid #b4b8cc; }
-QMenu::item:selected { background: #bec4d6; }
+* { font-family: 'Segoe UI', 'Inter', 'SF Pro Display', sans-serif; font-size: 13px; }
+
+QMainWindow { background: #f0f2f8; }
+QWidget#central { background: #f0f2f8; color: #1e2140; }
+QWidget { background: #f0f2f8; color: #1e2140; }
+
+QMenuBar { background: #e2e6f2; color: #3d4270; border-bottom: 1px solid #c8cedf; padding: 2px 0; }
+QMenuBar::item { padding: 4px 14px; border-radius: 4px; }
+QMenuBar::item:selected { background: #d0d6ec; color: #1e2140; }
+QMenu { background: #eef0f8; color: #1e2140; border: 1px solid #c4cadc; border-radius: 8px; padding: 4px; }
+QMenu::item { padding: 6px 20px 6px 12px; border-radius: 5px; }
+QMenu::item:selected { background: #dde2f2; }
+QMenu::separator { height: 1px; background: #c8cedf; margin: 4px 8px; }
+
 QGroupBox {
-    border: 1px solid #b4b8cc; border-radius: 6px;
-    margin-top: 8px; padding-top: 4px; color: #1c5fd2;
+    background: #e8ebf5;
+    border: 1px solid #c4cadc;
+    border-radius: 12px;
+    margin-top: 16px;
+    padding: 12px 10px 10px 10px;
+    color: #4a3fbf;
+    font-size: 11px; font-weight: bold; letter-spacing: 1.5px;
 }
-QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }
-QPushButton {
-    background: #b4b9cd; color: #4c4f69; border: none;
-    border-radius: 5px; padding: 4px 10px;
+QGroupBox::title {
+    subcontrol-origin: margin; subcontrol-position: top left;
+    left: 14px; top: 2px; padding: 0 6px;
+    background: #e8ebf5; color: #4a3fbf;
 }
-QPushButton:hover { background: #a2a8bf; }
-QPushButton:pressed { background: #9097b2; }
-QPushButton#action { background: #286060; color: #fff; }
-QPushButton#action:hover { background: #347878; }
-QPushButton#danger { background: #be2644; color: #fff; }
-QPushButton#danger:hover { background: #d43050; }
-QPushButton#success { background: #198237; color: #fff; }
-QPushButton#success:hover { background: #20a346; }
-QComboBox {
-    background: #dce0ec; color: #4c4f69; border: 1px solid #b4b8cc;
-    border-radius: 4px; padding: 2px 8px;
-}
-QComboBox QAbstractItemView { background: #e6e9f0; color: #4c4f69; }
-QLabel#lbl_h  { color: #1c5fd2; font-size: 20px; font-weight: bold; }
-QLabel#lbl_v  { color: #198237; font-size: 18px; }
-QLabel#lbl_p  { color: #5a5a73; }
-QLabel#lbl_f  { color: #af5800; }
-QLabel#lbl_temp { color: #5a5a73; }
-QLabel.section_hdr { color: #1c5fd2; font-weight: bold; }
-QLabel.green  { color: #198237; }
-QLabel.red    { color: #be2644; }
-QLabel.orange { color: #af5800; }
-QLabel.blue   { color: #1c5fd2; }
-QLabel.gray   { color: #5a5a73; }
-QFrame[frameShape="4"], QFrame[frameShape="5"] { color: #b4b8cc; }
-QScrollBar:vertical { background: #d2d7e4; width: 10px; }
-QScrollBar::handle:vertical { background: #9097b2; border-radius: 4px; }
-QStatusBar { background: #d2d7e4; color: #5a5a73; }
+
+QPushButton { background: #d8dcee; color: #2d3060; border: 1px solid #b8bee0; border-radius: 8px; padding: 6px 14px; min-height: 30px; }
+QPushButton:hover   { background: #c8ceea; border-color: #9098cc; }
+QPushButton:pressed { background: #b8c0e0; }
+QPushButton#action  { background: #2a5898; border-color: #1e4a88; color: #fff; }
+QPushButton#action:hover  { background: #3468ae; }
+QPushButton#danger  { background: #b82040; border-color: #a01838; color: #fff; }
+QPushButton#danger:hover  { background: #cc2850; }
+QPushButton#success { background: #1a7838; border-color: #156030; color: #fff; }
+QPushButton#success:hover { background: #208844; }
+QPushButton#btn_collapse { background: transparent; border: 1px solid #c4cadc; border-radius: 6px; color: #8890b0; padding: 2px; min-height: 24px; }
+QPushButton#btn_collapse:hover { background: #dde2f2; }
+QPushButton#btn_connect { background: #e8eaf8; border-color: #9098cc; color: #2d3060; min-height: 32px; }
+QPushButton#btn_connect:hover { background: #d8dcee; }
+
+QComboBox { background: #dde2f0; color: #1e2140; border: 1px solid #b8bee0; border-radius: 7px; padding: 4px 28px 4px 10px; min-height: 28px; }
+QComboBox:hover { border-color: #9098cc; }
+QComboBox::drop-down { border: none; width: 20px; }
+QComboBox::down-arrow { image: none; border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 5px solid #4a3fbf; margin-right: 8px; }
+QComboBox QAbstractItemView { background: #eef0f8; color: #1e2140; border: 1px solid #c4cadc; border-radius: 8px; selection-background-color: #d0d6ec; outline: none; }
+
+QCheckBox { color: #5a6080; spacing: 8px; }
+QCheckBox::indicator { width: 16px; height: 16px; border: 1px solid #9098cc; border-radius: 4px; background: #eef0f8; }
+QCheckBox::indicator:checked { background: #4a3fbf; border-color: #4a3fbf; }
+
+QLabel#lbl_h    { color: #4a3fbf; font-size: 26px; font-weight: bold; font-family: 'Consolas','monospace'; }
+QLabel#lbl_v    { color: #1a7838; font-size: 20px; font-family: 'Consolas','monospace'; }
+QLabel#lbl_p    { color: #6070a0; font-family: 'Consolas','monospace'; }
+QLabel#lbl_f    { color: #b05010; font-family: 'Consolas','monospace'; }
+QLabel#lbl_temp { color: #6070a0; font-family: 'Consolas','monospace'; }
+QLabel#lbl_profile, QLabel#lbl_conn { color: #6070a0; }
+
+QLabel.limit_val { color: #3a4070; font-family: 'Consolas','monospace'; font-size: 12px; }
+QLabel.limit_key { color: #8890b0; font-size: 11px; }
+QLabel.green  { color: #1a7838; }
+QLabel.red    { color: #b82040; }
+QLabel.orange { color: #b05010; }
+QLabel.blue   { color: #4a3fbf; }
+QLabel.gray, QLabel.muted { color: #8890b0; }
+QLabel.status { font-size: 12px; }
+
+QScrollBar:vertical { background: #dde2f0; width: 8px; border-radius: 4px; }
+QScrollBar::handle:vertical { background: #b8bee0; border-radius: 4px; min-height: 20px; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QFrame[frameShape="4"], QFrame[frameShape="5"] { color: #c4cadc; }
+QStatusBar { background: #e2e6f2; color: #8890b0; border-top: 1px solid #c8cedf; }
+QScrollArea { border: none; background: transparent; }
+QScrollArea > QWidget > QWidget { background: transparent; }
+QWidget#top_bar { background: #e2e6f2; border: 1px solid #c4cadc; border-radius: 10px; }
+QWidget#chart_toolbar { background: #e2e6f2; border: 1px solid #c4cadc; border-radius: 10px; }
 """
 
 
@@ -238,27 +383,40 @@ class SensorMainWindow(QMainWindow):
         root.setContentsMargins(4, 4, 4, 4)
         root.setSpacing(4)
 
-        # Top bar: collapse + profile label + connection status + connect button
-        top = QHBoxLayout()
-        self._btn_collapse = QPushButton("◀")
-        self._btn_collapse.setFixedWidth(28)
-        self._btn_collapse.clicked.connect(self._toggle_left_panel)
-        self._lbl_profile = QLabel("Active Profile: Untitled Profile")
+        # Top bar card
+        top_card = QWidget(); top_card.setObjectName("top_bar")
+        top_card.setFixedHeight(46)
+        top = QHBoxLayout(top_card)
+        top.setContentsMargins(10, 0, 10, 0); top.setSpacing(10)
 
-        self._lbl_conn_icon = QLabel("●"); self._lbl_conn_icon.setProperty("class", "gray")
-        self._lbl_conn      = QLabel("Disconnected");  self._lbl_conn.setProperty("class", "gray")
-        self._btn_connect   = _btn("Connect Sensor")
+        self._btn_collapse = QPushButton("◀")
+        self._btn_collapse.setObjectName("btn_collapse")
+        self._btn_collapse.setFixedWidth(30)
+        self._btn_collapse.clicked.connect(self._toggle_left_panel)
+
+        self._lbl_profile = QLabel("Active Profile: Untitled Profile")
+        self._lbl_profile.setObjectName("lbl_profile")
+
+        self._lbl_conn_icon = QLabel("●")
+        self._lbl_conn_icon.setObjectName("lbl_conn_icon")
+        self._lbl_conn_icon.setProperty("class", "gray")
+        self._lbl_conn = QLabel("Disconnected")
+        self._lbl_conn.setObjectName("lbl_conn")
+        self._lbl_conn.setProperty("class", "gray")
+
+        self._btn_connect = QPushButton("Connect Sensor")
+        self._btn_connect.setObjectName("btn_connect")
+        self._btn_connect.setFixedWidth(160)
         self._btn_connect.clicked.connect(self._toggle_connect)
 
         top.addWidget(self._btn_collapse)
         top.addWidget(self._lbl_profile, 1)
-        conn_row = QHBoxLayout(); conn_row.setSpacing(4)
+        conn_row = QHBoxLayout(); conn_row.setSpacing(5)
         conn_row.addWidget(self._lbl_conn_icon)
         conn_row.addWidget(self._lbl_conn)
         top.addLayout(conn_row)
         top.addWidget(self._btn_connect)
-        root.addLayout(top)
-        root.addWidget(_sep())
+        root.addWidget(top_card)
 
         # Splitter: left panel | right chart panel
         splitter = QSplitter(Qt.Horizontal)
@@ -330,33 +488,41 @@ class SensorMainWindow(QMainWindow):
         self._btn_manual_rwl.setVisible(False)
         lim_layout.addWidget(self._btn_manual_rwl)
 
-        # Two-column limits grid
-        grid = QGridLayout(); grid.setHorizontalSpacing(12)
-        def _g(text, css=""): l = QLabel(text); l.setProperty("class", css or "gray"); return l
-        grid.addWidget(_g("NWL (fill):"),       0, 0)
-        self._lbl_mwl           = QLabel("—"); grid.addWidget(self._lbl_mwl, 1, 0)
-        grid.addWidget(_g("MWL (fault):"),      2, 0)
-        self._lbl_mwl_fault     = QLabel("—"); grid.addWidget(self._lbl_mwl_fault, 3, 0)
-        grid.addWidget(_g("CWL (2s):"),         4, 0)
-        self._lbl_cwl_val       = QLabel("—"); grid.addWidget(self._lbl_cwl_val, 5, 0)
-        grid.addWidget(_g("Residual WL:"),      6, 0)
-        self._lbl_residual      = QLabel("0.0 mm"); grid.addWidget(self._lbl_residual, 7, 0)
+        # Two-column limits grid — key/value pairs
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(8); grid.setVerticalSpacing(2)
 
-        grid.addWidget(_g("Meniscus:"),         0, 1)
-        self._lbl_menis_val     = QLabel("0.0 mm"); grid.addWidget(self._lbl_menis_val, 1, 1)
-        grid.addWidget(_g("Overflow:"),         2, 1)
-        self._lbl_overflow      = QLabel("0.0 mm"); grid.addWidget(self._lbl_overflow, 3, 1)
-        grid.addWidget(_g("Safety margin c:"),  4, 1)
-        self._lbl_sm_static     = QLabel("—");  grid.addWidget(self._lbl_sm_static, 5, 1)
-        grid.addWidget(_g("Live headroom:"),    6, 1)
-        self._lbl_headroom      = QLabel("— mm"); grid.addWidget(self._lbl_headroom, 7, 1)
+        def _key(text):
+            l = QLabel(text); l.setProperty("class", "limit_key"); return l
+        def _val(text="—"):
+            l = QLabel(text); l.setProperty("class", "limit_val")
+            l.setWordWrap(True); return l
+
+        grid.addWidget(_key("NWL (fill):"),      0, 0)
+        self._lbl_mwl        = _val(); grid.addWidget(self._lbl_mwl, 0, 1)
+        grid.addWidget(_key("MWL (fault):"),     1, 0)
+        self._lbl_mwl_fault  = _val(); grid.addWidget(self._lbl_mwl_fault, 1, 1)
+        grid.addWidget(_key("CWL (2s):"),        2, 0)
+        self._lbl_cwl_val    = _val(); grid.addWidget(self._lbl_cwl_val, 2, 1)
+        grid.addWidget(_key("Residual WL:"),     3, 0)
+        self._lbl_residual   = _val("0.0 mm"); grid.addWidget(self._lbl_residual, 3, 1)
+        grid.addWidget(_key("Meniscus:"),        4, 0)
+        self._lbl_menis_val  = _val("0.0 mm"); grid.addWidget(self._lbl_menis_val, 4, 1)
+        grid.addWidget(_key("Overflow:"),        5, 0)
+        self._lbl_overflow   = _val("0.0 mm"); grid.addWidget(self._lbl_overflow, 5, 1)
+        grid.addWidget(_key("Safety margin c:"), 6, 0)
+        self._lbl_sm_static  = _val(); grid.addWidget(self._lbl_sm_static, 6, 1)
+        grid.addWidget(_key("Live headroom:"),   7, 0)
+        self._lbl_headroom   = _val("— mm"); grid.addWidget(self._lbl_headroom, 7, 1)
         lim_layout.addLayout(grid)
 
-        self._lbl_cwl_status    = QLabel("CWL: — (capture during fault test)")
-        self._lbl_cwl_auto_st   = QLabel("CWL: IDLE — arm while at MWL")
-        self._lbl_rwl_st        = QLabel("RWL: IDLE (set NWL to arm)")
+        lim_layout.addWidget(_sep())
+        self._lbl_cwl_status  = QLabel("CWL: — (capture during fault test)")
+        self._lbl_cwl_auto_st = QLabel("CWL: IDLE — arm while at MWL")
+        self._lbl_rwl_st      = QLabel("RWL: IDLE (set NWL to arm)")
         for lb in (self._lbl_cwl_status, self._lbl_cwl_auto_st, self._lbl_rwl_st):
-            lb.setProperty("class", "gray")
+            lb.setProperty("class", "status gray")
+            lb.setWordWrap(True)
             lim_layout.addWidget(lb)
         layout.addWidget(g_lim)
 
@@ -419,26 +585,34 @@ class SensorMainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
 
-        # Toolbar
-        tb = QHBoxLayout()
-        tb.setSpacing(6)
+        # Chart toolbar card
+        toolbar_card = QWidget(); toolbar_card.setObjectName("chart_toolbar")
+        toolbar_card.setFixedHeight(46)
+        tb = QHBoxLayout(toolbar_card)
+        tb.setContentsMargins(10, 0, 10, 0); tb.setSpacing(8)
 
-        tb.addWidget(QLabel("Axis:"))
+        def _tb_lbl(text):
+            l = QLabel(text); l.setProperty("class", "gray"); return l
+
+        tb.addWidget(_tb_lbl("Axis:"))
         self._combo_plot = QComboBox()
         self._combo_plot.addItems(["Height (mm)", "Volume (L)", "Flow Rate (L/s)"])
+        self._combo_plot.setFixedWidth(140)
         self._combo_plot.currentTextChanged.connect(self._on_plot_mode_changed)
         tb.addWidget(self._combo_plot)
 
-        tb.addWidget(QLabel("Window:"))
+        tb.addWidget(_tb_lbl("Window:"))
         self._combo_win = QComboBox()
         self._combo_win.addItems(list(SensorPlotWidget.WINDOW_OPTIONS.keys()))
         self._combo_win.setCurrentText("30 s")
+        self._combo_win.setFixedWidth(76)
         self._combo_win.currentTextChanged.connect(self._on_window_changed)
         tb.addWidget(self._combo_win)
 
-        tb.addWidget(QLabel("Smooth:"))
+        tb.addWidget(_tb_lbl("Smooth:"))
         self._combo_smooth = QComboBox()
         self._combo_smooth.addItems(["None", "SMA-5", "SMA-20", "EMA-Fast", "EMA-Slow"])
+        self._combo_smooth.setFixedWidth(108)
         self._combo_smooth.currentTextChanged.connect(self._on_smooth_changed)
         tb.addWidget(self._combo_smooth)
 
@@ -448,19 +622,23 @@ class SensorMainWindow(QMainWindow):
         tb.addWidget(self._chk_autoscroll)
 
         self._btn_pause = _btn("Pause")
+        self._btn_pause.setFixedWidth(80)
         self._btn_pause.clicked.connect(self._toggle_pause)
         tb.addWidget(self._btn_pause)
 
         btn_shot = _btn("Screenshot")
+        btn_shot.setFixedWidth(100)
         btn_shot.clicked.connect(self._export_screenshot)
         tb.addWidget(btn_shot)
 
         btn_colors = _btn("Colors")
+        btn_colors.setFixedWidth(66)
         btn_colors.clicked.connect(self._open_colors_dlg)
         tb.addWidget(btn_colors)
 
-        tb.addSpacing(8)
-        tb.addWidget(QLabel("Delta:"))
+        tb.addStretch()
+
+        tb.addWidget(_tb_lbl("Delta:"))
         self._lbl_delta = QLabel("---")
         self._lbl_delta.setProperty("class", "blue")
         tb.addWidget(self._lbl_delta)
@@ -468,9 +646,8 @@ class SensorMainWindow(QMainWindow):
         btn_clr_delta.setFixedWidth(52)
         btn_clr_delta.clicked.connect(self._clear_delta)
         tb.addWidget(btn_clr_delta)
-        tb.addStretch()
 
-        layout.addLayout(tb)
+        layout.addWidget(toolbar_card)
 
         # Plot widget
         self._plot = SensorPlotWidget(self._app)
