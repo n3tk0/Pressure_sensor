@@ -72,19 +72,17 @@ _SCRIPT_DIR = BASE_DIR
 def _find_font(name_hints: list[str]) -> str | None:
     """
     Search for a TTF/OTF font by name hints.
-    When running as a frozen exe (PyInstaller), fonts must be bundled alongside
-    the exe — skip Windows system directories to avoid slow directory scans and
-    ensure the app only uses its own bundled assets (PERF-04).
-    When running as a script, also search Windows system font directories.
+    Checks: script dir → script/fonts/ → Windows Fonts → user Fonts.
     Returns the first found path, or None.
+
+    Note: DearPyGui loads fonts at runtime from a filesystem path — it does NOT
+    require fonts to be embedded in the PyInstaller bundle.  System fonts at
+    C:\\Windows\\Fonts are accessible from a frozen .exe just as from a .py script,
+    so we always include the system directories in the search.
     """
-    if getattr(sys, "frozen", False):
-        # Frozen exe: only look in exe directory and its fonts/ subdirectory
-        search_dirs = [_SCRIPT_DIR, _SCRIPT_DIR / "fonts"]
-    else:
-        win_fonts = Path(r"C:\Windows\Fonts")
-        user_fonts = Path.home() / "AppData" / "Local" / "Microsoft" / "Windows" / "Fonts"
-        search_dirs = [_SCRIPT_DIR, _SCRIPT_DIR / "fonts", win_fonts, user_fonts]
+    win_fonts = Path(r"C:\Windows\Fonts")
+    user_fonts = Path.home() / "AppData" / "Local" / "Microsoft" / "Windows" / "Fonts"
+    search_dirs = [_SCRIPT_DIR, _SCRIPT_DIR / "fonts", win_fonts, user_fonts]
 
     for hint in name_hints:
         for d in search_dirs:
@@ -2036,6 +2034,7 @@ _font_ui = None       # 16 px — general UI
 _font_medium = None   # 20 px — secondary readouts
 _font_large = None    # 30 px — big H / V display
 
+_font_ui = _font_medium = _font_large = None  # set below if a font file is found
 with dpg.font_registry():
     if _FONT_PATH_REGULAR:
         _font_ui     = dpg.add_font(_FONT_PATH_REGULAR, 16)
