@@ -19,8 +19,10 @@ import math
 import bisect
 import logging
 import re
+import copy
 import shutil
 import tempfile
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from datetime import datetime
 
@@ -70,12 +72,19 @@ _SCRIPT_DIR = BASE_DIR
 def _find_font(name_hints: list[str]) -> str | None:
     """
     Search for a TTF/OTF font by name hints.
-    Checks: script dir → script/fonts/ → Windows Fonts → user Fonts.
+    When running as a frozen exe (PyInstaller), fonts must be bundled alongside
+    the exe — skip Windows system directories to avoid slow directory scans and
+    ensure the app only uses its own bundled assets (PERF-04).
+    When running as a script, also search Windows system font directories.
     Returns the first found path, or None.
     """
-    win_fonts = Path(r"C:\Windows\Fonts")
-    user_fonts = Path.home() / "AppData" / "Local" / "Microsoft" / "Windows" / "Fonts"
-    search_dirs = [_SCRIPT_DIR, _SCRIPT_DIR / "fonts", win_fonts, user_fonts]
+    if getattr(sys, "frozen", False):
+        # Frozen exe: only look in exe directory and its fonts/ subdirectory
+        search_dirs = [_SCRIPT_DIR, _SCRIPT_DIR / "fonts"]
+    else:
+        win_fonts = Path(r"C:\Windows\Fonts")
+        user_fonts = Path.home() / "AppData" / "Local" / "Microsoft" / "Windows" / "Fonts"
+        search_dirs = [_SCRIPT_DIR, _SCRIPT_DIR / "fonts", win_fonts, user_fonts]
 
     for hint in name_hints:
         for d in search_dirs:
@@ -144,34 +153,52 @@ def save_settings(conn, app_s):
         logging.warning(f"Could not save settings: {e}")
 
 # ── Profile ─────────────────────────────────────────────────────────
+@dataclass
+class CalibrationPoint:
+    """Single pressure→height/volume calibration point (stored in bar/mm/L)."""
+    p: float   # pressure (bar)
+    h: float   # height (mm)
+    v: float   # volume (L)
+
+
+@dataclass
 class CisternProfile:
-    def __init__(self):
-        self.name = "Untitled Profile"
-        self.points = []
-        self.mwl = 0.0           # NWL — Nominal Water Level (normal fill, BELOW overflow)
-        self.mwl_fault = 0.0     # MWL — Max Water Level during fault (ABOVE overflow, ≤20mm)
-        self.meniscus = 0.0      # Meniscus delta above OF (≤5mm above overflow)
-        self.cwl = 0.0           # CWL — Critical WL 2s after fault cutoff (ABOVE overflow, ≤10mm)
-        self.overflow = 0.0      # OF — overflow level (absolute height)
-        self.water_discharge = 0.0
-        self.residual_wl = 0.0   # RWL — Residual Water Level (min after flush)
+    name: str = "Untitled Profile"
+    points: list = field(default_factory=list)   # list[CalibrationPoint]
+    mwl: float = 0.0           # NWL — Nominal Water Level (normal fill, BELOW overflow)
+    mwl_fault: float = 0.0     # MWL — Max Water Level during fault (ABOVE overflow, ≤20mm)
+    meniscus: float = 0.0      # Meniscus delta above OF (≤5mm above overflow)
+    cwl: float = 0.0           # CWL — Critical WL 2s after fault cutoff (ABOVE overflow, ≤10mm)
+    overflow: float = 0.0      # OF — overflow level (absolute height)
+    water_discharge: float = 0.0
+    residual_wl: float = 0.0   # RWL — Residual Water Level (min after flush)
 
     def to_dict(self):
-        return {k: getattr(self, k) for k in
-                ["name", "points", "mwl", "mwl_fault", "meniscus", "cwl", "overflow",
-                 "water_discharge", "residual_wl"]}
+        d = {k: getattr(self, k) for k in
+             ["name", "mwl", "mwl_fault", "meniscus", "cwl", "overflow",
+              "water_discharge", "residual_wl"]}
+        d["points"] = [{"p": pt.p, "h": pt.h, "v": pt.v} for pt in self.points]
+        return d
 
-    def from_dict(self, d):
-        for k in ["name", "points", "mwl", "mwl_fault", "meniscus", "cwl", "overflow",
-                  "water_discharge", "residual_wl"]:
-            if k in d:
-                setattr(self, k, d[k])
+    @classmethod
+    def from_dict(cls, d):
+        pts = [CalibrationPoint(p=float(r.get("p", 0)), h=float(r.get("h", 0)),
+                                v=float(r.get("v", 0)))
+               for r in d.get("points", [])]
+        return cls(
+            name=d.get("name", "Untitled Profile"),
+            points=pts,
+            mwl=float(d.get("mwl", 0.0)),
+            mwl_fault=float(d.get("mwl_fault", 0.0)),
+            meniscus=float(d.get("meniscus", 0.0)),
+            cwl=float(d.get("cwl", 0.0)),
+            overflow=float(d.get("overflow", 0.0)),
+            water_discharge=float(d.get("water_discharge", 0.0)),
+            residual_wl=float(d.get("residual_wl", 0.0)),
+        )
 
     def clone(self):
-        p = CisternProfile()
-        p.from_dict(self.to_dict())
-        p.points = [dict(pt) for pt in self.points]
-        return p
+        return replace(self, points=copy.deepcopy(self.points))
 
 # ── Pressure unit conversion ────────────────────────────────────────
 PRESSURE_UNITS = {"bar": (1.0, "bar"), "mbar": (1000.0, "mbar"), "kPa": (100.0, "kPa")}
@@ -202,6 +229,9 @@ def p_parse_to_bar(text, unit=None):
 
 # ── Smoothing ───────────────────────────────────────────────────────
 def smooth(data, alg):
+    # PERF-02: full O(N) rebuild on every chart refresh is acceptable because
+    # max_pts=12 000 and the chart refresh interval is ≥100 ms. If buffer size
+    # grows, switch SMA to a running-sum accumulator to reduce to O(N).
     if alg == "None" or len(data) < 2:
         return list(data)
     r = []
@@ -226,12 +256,15 @@ _interp_cache_version = 0  # bumped on every rebuild
 _interp_expected_version = -1  # checked in interp_hv
 _interp_lock = threading.Lock()
 
+# EN-06: per-session air gap manual confirmation (not saved; resets on restart)
+_air_gap_confirmed = [False]  # list so closure in dialog callback can mutate it
+
 def _rebuild_interp_cache(pts):
     """Pre-sort calibration points once. Call on profile load/save/edit."""
     global _sorted_pts_cache, _sorted_pts_pressures, _interp_cache_version
     with _interp_lock:
-        _sorted_pts_cache = sorted(pts, key=lambda x: x["p"])
-        _sorted_pts_pressures = [pt["p"] for pt in _sorted_pts_cache]
+        _sorted_pts_cache = sorted(pts, key=lambda x: x.p)
+        _sorted_pts_pressures = [pt.p for pt in _sorted_pts_cache]
         _interp_cache_version += 1
 
 def interp_hv(p_bar, pts):
@@ -243,26 +276,26 @@ def interp_hv(p_bar, pts):
     # on another thread (safe in CPython today; required for free-threaded Python).
     with _interp_lock:
         if _interp_expected_version != _interp_cache_version:
-            _sorted_pts_cache[:] = sorted(pts, key=lambda x: x["p"])
-            _sorted_pts_pressures[:] = [pt["p"] for pt in _sorted_pts_cache]
+            _sorted_pts_cache[:] = sorted(pts, key=lambda x: x.p)
+            _sorted_pts_pressures[:] = [pt.p for pt in _sorted_pts_cache]
             _interp_expected_version = _interp_cache_version
         sp = _sorted_pts_cache          # captured inside lock
         pressures = _sorted_pts_pressures
     if len(sp) == 1:
-        return sp[0]["h"], sp[0]["v"]
-    if p_bar <= sp[0]["p"]:
-        d = sp[1]["p"] - sp[0]["p"]
-        r = (p_bar - sp[0]["p"]) / d if d else 0
-        return sp[0]["h"] + r * (sp[1]["h"] - sp[0]["h"]), sp[0]["v"] + r * (sp[1]["v"] - sp[0]["v"])
-    if p_bar >= sp[-1]["p"]:
-        d = sp[-1]["p"] - sp[-2]["p"]
-        r = (p_bar - sp[-2]["p"]) / d if d else 0
-        return sp[-2]["h"] + r * (sp[-1]["h"] - sp[-2]["h"]), sp[-2]["v"] + r * (sp[-1]["v"] - sp[-2]["v"])
+        return sp[0].h, sp[0].v
+    if p_bar <= sp[0].p:
+        d = sp[1].p - sp[0].p
+        r = (p_bar - sp[0].p) / d if d else 0
+        return sp[0].h + r * (sp[1].h - sp[0].h), sp[0].v + r * (sp[1].v - sp[0].v)
+    if p_bar >= sp[-1].p:
+        d = sp[-1].p - sp[-2].p
+        r = (p_bar - sp[-2].p) / d if d else 0
+        return sp[-2].h + r * (sp[-1].h - sp[-2].h), sp[-2].v + r * (sp[-1].v - sp[-2].v)
     i = bisect.bisect_right(pressures, p_bar) - 1
     i = max(0, min(i, len(sp) - 2))
-    d = sp[i+1]["p"] - sp[i]["p"]
-    r = (p_bar - sp[i]["p"]) / d if d else 0
-    return sp[i]["h"] + r * (sp[i+1]["h"] - sp[i]["h"]), sp[i]["v"] + r * (sp[i+1]["v"] - sp[i]["v"])
+    d = sp[i+1].p - sp[i].p
+    r = (p_bar - sp[i].p) / d if d else 0
+    return sp[i].h + r * (sp[i+1].h - sp[i].h), sp[i].v + r * (sp[i+1].v - sp[i].v)
 
 # ── IFM Protocol ────────────────────────────────────────────────────
 # IFM PI1789 PDIN layout: bytes 0-3 = pressure, bytes 4-7 = temperature
@@ -292,7 +325,7 @@ class SensorApp:
         if _default.exists():
             try:
                 with open(_default, encoding="utf-8") as _f:
-                    self.profile.from_dict(json.load(_f))
+                    self.profile = CisternProfile.from_dict(json.load(_f))
             except Exception as e:
                 logging.warning(f"Could not load default profile, starting blank: {e}")
         self.serial_conn = None
@@ -800,6 +833,7 @@ def _refresh_flush_table():
         for i, r in enumerate(results):
             total_rate = r["vol"] / r["time"] if r["time"] > 0 else 0
             en_rate = r.get("en14055_rate")
+            en_note = r.get("en14055_note")
             en_str = f"{en_rate:.2f}" if en_rate is not None else "—"
             type_col = COL_ACCENT if "Full" in r["type"] else COL_ORANGE
             with dpg.table_row():
@@ -808,8 +842,13 @@ def _refresh_flush_table():
                 dpg.add_text(f"{r['vol']:.2f}L")
                 dpg.add_text(f"{r['time']:.1f}s")
                 dpg.add_text(f"{total_rate:.2f}")
-                dpg.add_text(en_str,
+                # EN-03: show note as tooltip when EN effective rate is unavailable
+                en_cell_tag = f"en_cell_{i}"
+                dpg.add_text(en_str, tag=en_cell_tag,
                              color=COL_ACCENT if en_rate is not None else COL_GRAY)
+                if en_note:
+                    with dpg.tooltip(en_cell_tag):
+                        dpg.add_text(en_note, color=COL_ORANGE)
                 dpg.add_button(label="X", width=22,
                                user_data=i, callback=_delete_flush_row)
 
@@ -961,11 +1000,17 @@ def _check_compliance():
     else:
         results.append("[----] Meniscus: let cistern overflow, stabilise, press 'Set Meniscus'")
 
-    # ── 5. Air gap a: OF − inlet orifice ≥ 20 mm (§5.2.7) ───────────
-    # Prevents backflow into supply pipe. The lowest point of the inlet valve
-    # air orifice must be ≥ 20 mm above overflow level (ruler measurement).
-    results.append("[INFO] Air gap a (§5.2.7): measure OF − inlet valve air orifice ≥ 20 mm "
-                   "(ruler/tape — cannot be measured by pressure sensor)")
+    # ── 5. Air gap a: water_discharge − CWL ≥ 20 mm (§5.2.7) ──────────
+    # EN-04: auto-compute from Water Discharge height and CWL height.
+    # water_discharge = height of inlet valve orifice (lowest point); CWL = critical water level.
+    # air gap a = water_discharge − CWL (must be ≥ 20 mm to prevent backflow siphoning).
+    _air_gap_auto = None  # None = not computable; float = computed gap (mm)
+    if p.water_discharge > 0 and p.cwl > 0:
+        _air_gap_auto = p.water_discharge - p.cwl
+        if _air_gap_auto >= 20:
+            results.append(f"[PASS] Air gap a (§5.2.7): {_air_gap_auto:.1f} mm (WD−CWL) ≥ 20 mm")
+        else:
+            results.append(f"[FAIL] Air gap a (§5.2.7): {_air_gap_auto:.1f} mm (WD−CWL) < 20 mm")
 
     # ── 6. Residual WL (informational) ────────────────────────────────
     if p.residual_wl > 0:
@@ -1004,13 +1049,36 @@ def _check_compliance():
     if dpg.does_item_exist("dlg_comply"):
         dpg.delete_item("dlg_comply")
     with dpg.window(label="EN 14055 Compliance Check", modal=True, tag="dlg_comply",
-                     width=560, height=440, no_resize=True, pos=[320, 180]):
-        with dpg.child_window(height=370, border=False):
+                     width=560, height=460, no_resize=True, pos=[320, 180]):
+        with dpg.child_window(height=350, border=False):
             for line in results:
                 col = (COL_GREEN  if "[PASS]" in line else
                        COL_RED    if "[FAIL]" in line else
                        COL_ORANGE if "[WARN]" in line else COL_GRAY)
                 dpg.add_text(line, color=col)
+            # EN-06: manual air gap confirmation when WD or CWL not set
+            if _air_gap_auto is None:
+                dpg.add_separator()
+                dpg.add_text("Air gap a (§5.2.7): set Water Discharge height to auto-compute,", color=COL_GRAY)
+                dpg.add_text("or confirm physical ruler measurement ≥ 20 mm:", color=COL_GRAY)
+                _ag_lbl_init = ("[PASS] Air gap manually confirmed ≥ 20 mm"
+                                if _air_gap_confirmed[0]
+                                else "[----] Air gap: not yet confirmed (tick to acknowledge)")
+                _ag_col_init = COL_GREEN if _air_gap_confirmed[0] else COL_GRAY
+                dpg.add_text(_ag_lbl_init, tag="ag_manual_lbl", color=_ag_col_init)
+                def _on_ag_check(s, a):
+                    _air_gap_confirmed[0] = a
+                    if a:
+                        dpg.configure_item("ag_manual_lbl",
+                                           default_value="[PASS] Air gap manually confirmed ≥ 20 mm",
+                                           color=COL_GREEN)
+                    else:
+                        dpg.configure_item("ag_manual_lbl",
+                                           default_value="[----] Air gap: not yet confirmed (tick to acknowledge)",
+                                           color=COL_GRAY)
+                dpg.add_checkbox(label="Confirmed ≥ 20 mm",
+                                 default_value=_air_gap_confirmed[0],
+                                 callback=_on_ag_check)
         dpg.add_separator()
         dpg.add_button(label="Close", width=120,
                        callback=lambda: dpg.delete_item("dlg_comply"))
@@ -1310,7 +1378,7 @@ def _open_calibration_dlg():
             dpg.delete_item("cal_table")
         unit = app.app_settings.get("pressure_unit", "bar")
         _, unit_label = PRESSURE_UNITS.get(unit, (1.0, "bar"))
-        clone.points.sort(key=lambda x: x["p"])
+        clone.points.sort(key=lambda x: x.p)
         with dpg.table(tag="cal_table", header_row=True, borders_innerH=True,
                         borders_outerH=True, borders_innerV=True, borders_outerV=True,
                         row_background=True, height=200, scrollY=True,
@@ -1321,10 +1389,10 @@ def _open_calibration_dlg():
             dpg.add_table_column(label="Actions", width_fixed=True, init_width_or_weight=100)
             for idx, pt in enumerate(clone.points):
                 with dpg.table_row():
-                    # pt['p'] is always stored in bar; convert for display
-                    dpg.add_text(p_format(pt["p"], unit=unit).split()[0])
-                    dpg.add_text(f"{pt['h']:.1f}")
-                    dpg.add_text(f"{pt['v']:.2f}")
+                    # pt.p is always stored in bar; convert for display
+                    dpg.add_text(p_format(pt.p, unit=unit).split()[0])
+                    dpg.add_text(f"{pt.h:.1f}")
+                    dpg.add_text(f"{pt.v:.2f}")
                     with dpg.group(horizontal=True):
                         dpg.add_button(label="Edit", width=42, user_data=idx,
                                        callback=lambda s, a, u: edit_point(u))
@@ -1336,9 +1404,9 @@ def _open_calibration_dlg():
         if 0 <= idx < len(clone.points):
             pt = clone.points[idx]
             unit = app.app_settings.get("pressure_unit", "bar")
-            dpg.set_value("cal_p", p_format(pt["p"], unit=unit).split()[0])
-            dpg.set_value("cal_h", f"{pt['h']:.1f}")
-            dpg.set_value("cal_v", f"{pt['v']:.2f}")
+            dpg.set_value("cal_p", p_format(pt.p, unit=unit).split()[0])
+            dpg.set_value("cal_h", f"{pt.h:.1f}")
+            dpg.set_value("cal_v", f"{pt.v:.2f}")
             _cal_edit_idx[0] = idx
             dpg.set_item_label("btn_cal_add", "Update Point")
 
@@ -1363,15 +1431,15 @@ def _open_calibration_dlg():
         # BUG-09: reject duplicate pressure values (would cause division-by-zero in interp_hv)
         edit_idx = _cal_edit_idx[0]
         for i, pt in enumerate(clone.points):
-            if i != edit_idx and abs(pt["p"] - p) < 1e-9:
+            if i != edit_idx and abs(pt.p - p) < 1e-9:
                 _show_toast("⚠ Duplicate pressure value — adjust and retry.")
                 return
         if edit_idx is not None and 0 <= edit_idx < len(clone.points):
-            clone.points[edit_idx] = {"p": p, "h": h, "v": v}
+            clone.points[edit_idx] = CalibrationPoint(p=p, h=h, v=v)
             _cal_edit_idx[0] = None
             dpg.set_item_label("btn_cal_add", "Add Point")
         else:
-            clone.points.append({"p": p, "h": h, "v": v})
+            clone.points.append(CalibrationPoint(p=p, h=h, v=v))
             _cal_edit_idx[0] = None
         dpg.set_value("cal_p", "")
         dpg.set_value("cal_h", "")
@@ -1501,7 +1569,7 @@ def _cal_import_cb(sender, app_data, profile_clone, refresh_fn):
                     if not all(math.isfinite(x) for x in (p, h, v)):
                         skipped += 1
                         continue
-                    new_pts.append({"p": p, "h": h, "v": v})
+                    new_pts.append(CalibrationPoint(p=p, h=h, v=v))
         else:  # JSON
             with open(fp, encoding="utf-8") as f:               # CQ-04
                 data = json.load(f)
@@ -1513,7 +1581,7 @@ def _cal_import_cb(sender, app_data, profile_clone, refresh_fn):
                 if not all(math.isfinite(x) for x in (p, h, v)):
                     skipped += 1
                     continue
-                new_pts.append({"p": p, "h": h, "v": v})
+                new_pts.append(CalibrationPoint(p=p, h=h, v=v))
         profile_clone.points = new_pts
         refresh_fn()
         msg = f"Imported {len(new_pts)} points from {fp.name}"
@@ -1646,7 +1714,7 @@ def _load_profile_cb(sender, app_data):
     if fp:
         try:
             with open(fp, encoding="utf-8") as f:
-                app.profile.from_dict(json.load(f))
+                app.profile = CisternProfile.from_dict(json.load(f))
             _rebuild_interp_cache(app.profile.points)
             app.recalc_from_pressure()
             _refresh_limits()
