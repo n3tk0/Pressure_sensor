@@ -90,13 +90,13 @@ ApplicationWindow {
         target: bridge
         function onConnectionChanged(text, cls, connected) {
             connLabel.text = text
-            connDot.color  = bridge.colorForClass(cls)
+            connDot.color  = root.colorForClass(cls)
             btnConnect.text = connected ? "Disconnect" : "Connect Sensor"
-            btnConnect.highlighted = connected
+            btnConnect.connected = connected
         }
         function onToastMessage(msg) { toast.show(msg) }
-        function onRwlStateChanged(text, cls)     { rwlState.text = text;    rwlState.color = bridge.colorForClass(cls) }
-        function onCwlAutoStateChanged(text, cls) { cwlAutoState.text = text; cwlAutoState.color = bridge.colorForClass(cls) }
+        function onRwlStateChanged(text, cls)     { rwlState.text = text;    rwlState.color = root.colorForClass(cls) }
+        function onCwlAutoStateChanged(text, cls) { cwlAutoState.text = text; cwlAutoState.color = root.colorForClass(cls) }
         function onChartDataReady(pts)  { sensorChart.updateSeries(pts)  }
         function onLimitsChanged()      { limitsCard.refresh()            }
         function onFlushChanged()       { flushCard.refreshState()        }
@@ -211,7 +211,7 @@ ApplicationWindow {
                 Button {
                     id: btnConnect
                     text: "Connect Sensor"
-                    property bool highlighted: false
+                    property bool connected: false
                     contentItem: Text {
                         text: parent.text; color: "#e2e8f0"
                         font.pixelSize: 13; font.family: fontSans.name
@@ -220,7 +220,7 @@ ApplicationWindow {
                     }
                     background: Rectangle {
                         radius: 7
-                        color: btnConnect.highlighted
+                        color: btnConnect.connected
                             ? (btnConnect.hovered ? "#8c3a3a" : "#7a2e2e")
                             : (btnConnect.hovered ? "#3d3fa8" : "#312f8a")
                         Behavior on color { ColorAnimation { duration: 200 } }
@@ -342,7 +342,7 @@ ApplicationWindow {
                             text: "Screenshot"
                             implicitWidth: 100; implicitHeight: 30
                             contentItem: Text { text: parent.text; color: "#e2e8f0"; font.pixelSize: 12; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
-                            background: Rectangle { color: hovered ? "#2e2f5c" : "#22234a"; radius: 6 }
+                            background: Rectangle { color: parent.hovered ? "#2e2f5c" : "#22234a"; radius: 6 }
                             onClicked: bridge.exportScreenshot()
                         }
 
@@ -357,7 +357,7 @@ ApplicationWindow {
                             text: "Clear"
                             implicitWidth: 52; implicitHeight: 30
                             contentItem: Text { text: parent.text; color: "#e2e8f0"; font.pixelSize: 11; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
-                            background: Rectangle { color: hovered ? "#3a1f1f" : "#2c1818"; radius: 6 }
+                            background: Rectangle { color: parent.hovered ? "#3a1f1f" : "#2c1818"; radius: 6 }
                             onClicked: deltaLabel.text = "---"
                         }
                     }
@@ -472,13 +472,13 @@ Rectangle {
             // Volume
             ColumnLayout {
                 spacing: 2
-                horizontalItemAlignment: ColumnLayout.AlignRight
                 Text {
+                    Layout.alignment: Qt.AlignRight
                     text: bridge.volume.toFixed(2) + " L"
                     color: "#4ade80"; font.pixelSize: 20; font.weight: Font.Medium
                     font.family: "monospace"
                 }
-                Text { text: "VOLUME"; color: "#4a5568"; font.pixelSize: 10; font.letterSpacing: 1.2 }
+                Text { Layout.alignment: Qt.AlignRight; text: "VOLUME"; color: "#4a5568"; font.pixelSize: 10; font.letterSpacing: 1.2 }
             }
         }
 
