@@ -1,0 +1,703 @@
+"""
+sensor_core.py — Pure logic for the EN 14055 Cistern Analytics app.
+
+Contains every class, function, and constant that has zero GUI dependency.
+Shared by both sensor_app.py (DearPyGui) and sensor_app_qt.py (Qt).
+"""
+import sys
+import time
+import threading
+import collections
+import struct
+import json
+import csv
+import os
+import math
+import bisect
+import logging
+import copy
+import shutil
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+from datetime import datetime
+
+try:
+    import serial
+    import serial.tools.list_ports
+except ImportError as e:
+    logging.error(f"pyserial not found: {e}. Install with: pip install pyserial")
+    raise
+
+logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s")
+
+# ── IFM PI1789 protocol constants ───────────────────────────────────
+_PRESSURE_SCALE_BAR_PER_LSB: float = 0.0001
+_PRESSURE_MIN_BAR: float = 0.0
+_PRESSURE_MAX_BAR: float = 10.0        # PI1789 rated range (0–10 bar)
+_PACKET_HEADER_SIZE: int = 12          # 2 SOF + 8 length hex + 2 reserved
+_RX_BUF_HIGH_WATERMARK: int = 4000
+_RX_BUF_LOW_WATERMARK: int = 2000
+_PDIN_TEMP_OFFSET = 8    # hex-string start index of temperature word
+_PDIN_TEMP_END    = 16   # hex-string end index  (4 bytes = 8 hex chars)
+_PDIN_TEMP_SCALE  = 0.1  # °C per LSB
+_TEMP_PLACEHOLDER = "-- °C"
+
+# ── EN 14055:2015 constants ──────────────────────────────────────────
+EN14055_CWL_WAIT_S: float = 2.0
+EN14055_SAFETY_MARGIN_MIN_MM: float = 20.0
+EN14055_MWL_MAX_ABOVE_OF_MM: float = 20.0
+EN14055_CWL_MAX_ABOVE_OF_MM: float = 10.0
+EN14055_MENISCUS_MAX_ABOVE_OF_MM: float = 5.0
+EN14055_FULL_FLUSH_MAX_L: float = 6.0
+EN14055_PART_FLUSH_MAX_L: float = 4.0
+EN14055_REQUIRED_FLUSH_COUNT: int = 3
+EN14055_CWL_DROP_THRESH_MM: float = 1.5
+EN14055_FLUSH_MIN_DURATION_S: float = 3.0
+EN14055_FLUSH_RISE_THRESH_MM: float = 5.0
+EN14055_FLUSH_RISE_CONFIRM_S: float = 2.0
+EN14055_CWL_HISTORY_SAMPLES: int = 150
+EN14055_MAX_CAL_FILE_BYTES: int = 10 * 1024 * 1024  # 10 MB import guard
+
+# ── Runtime base directory ───────────────────────────────────────────
+if getattr(sys, "frozen", False):
+    BASE_DIR = Path(sys.executable).parent
+else:
+    BASE_DIR = Path(__file__).parent
+
+CONFIG_DIR = BASE_DIR / "config"
+EXPORT_DIR = BASE_DIR / "exports"
+
+for _d in (CONFIG_DIR, EXPORT_DIR):
+    _d.mkdir(exist_ok=True)
+
+# ── Font discovery ───────────────────────────────────────────────────
+_SCRIPT_DIR = BASE_DIR
+
+def _find_font(name_hints: list[str]) -> str | None:
+    """Search for a TTF/OTF font by name hints.
+    Checks: script dir → script/fonts/ → Windows Fonts → user Fonts.
+    DearPyGui and Qt both load fonts from filesystem paths at runtime,
+    so system fonts are accessible from a frozen exe without bundling.
+    """
+    win_fonts = Path(r"C:\Windows\Fonts")
+    user_fonts = Path.home() / "AppData" / "Local" / "Microsoft" / "Windows" / "Fonts"
+    search_dirs = [_SCRIPT_DIR, _SCRIPT_DIR / "fonts", win_fonts, user_fonts]
+    for hint in name_hints:
+        for d in search_dirs:
+            for ext in (".ttf", ".otf", ".TTF", ".OTF"):
+                p = d / (hint + ext)
+                if p.exists():
+                    return str(p)
+    return None
+
+# Priority: Samsung Sans → Segoe UI Variable → Segoe UI → Inter → Arial
+FONT_PATH_REGULAR = (
+    _find_font(["SamsungSans-Regular", "SamsungSans_v2.0", "SamsungSansV2", "SamsungSans"]) or
+    _find_font(["SegoeUI-VF", "SegoeUIVariable-Text", "SegoeUIVariable"]) or
+    _find_font(["segoeui"]) or
+    _find_font(["Inter-Regular", "Inter_Regular", "Inter"]) or
+    _find_font(["arial"])
+)
+FONT_PATH_BOLD = (
+    _find_font(["SamsungSans-Bold", "SamsungSansBold"]) or
+    _find_font(["segoeuib"]) or
+    _find_font(["Inter-Bold", "Inter_Bold"]) or
+    _find_font(["arialbd"]) or
+    FONT_PATH_REGULAR
+)
+
+# ── Settings persistence ─────────────────────────────────────────────
+SETTINGS_FILE = CONFIG_DIR / "settings.json"
+
+DEFAULT_CONN = {"port": "COM8", "baud": 115200, "io_port": "Port 1", "poll_ms": 50}
+DEFAULT_LINE_COLORS = {
+    "sensor": [137, 180, 250, 255],
+    "mwl":    [100, 200, 255, 255],
+    "menis":  [180, 130, 255, 255],
+    "wd":     [243, 139, 168, 255],
+    "cwl":    [250, 179,  90, 255],
+}
+DEFAULT_APP = {
+    "avg_window": 0.5, "cwl_mode": "Automatic", "cwl_drop_thresh": 1.5,
+    "cwl_smooth": "SMA-5", "ui_refresh_ms": 50, "chart_refresh_ms": 100,
+    "pressure_unit": "bar",
+    "ui_theme": "Dark",
+    "line_colors": {k: list(v) for k, v in DEFAULT_LINE_COLORS.items()},
+}
+
+def load_settings():
+    try:
+        if SETTINGS_FILE.exists():
+            with open(SETTINGS_FILE, encoding="utf-8") as f:
+                d = json.load(f)
+                return d.get("conn", dict(DEFAULT_CONN)), d.get("app", dict(DEFAULT_APP))
+    except Exception as e:
+        logging.warning(f"Could not load settings, using defaults: {e}")
+    return dict(DEFAULT_CONN), dict(DEFAULT_APP)
+
+def save_settings(conn, app_s):
+    try:
+        CONFIG_DIR.mkdir(exist_ok=True)
+        tmp = SETTINGS_FILE.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"conn": conn, "app": app_s}, f, indent=2)
+        shutil.move(str(tmp), str(SETTINGS_FILE))
+    except Exception as e:
+        logging.warning(f"Could not save settings: {e}")
+
+# ── Profile dataclasses ──────────────────────────────────────────────
+@dataclass
+class CalibrationPoint:
+    """Single pressure→height/volume calibration point (stored in bar/mm/L)."""
+    p: float
+    h: float
+    v: float
+
+
+@dataclass
+class CisternProfile:
+    name: str = "Untitled Profile"
+    points: list = field(default_factory=list)   # list[CalibrationPoint]
+    mwl: float = 0.0           # NWL — Nominal Water Level
+    mwl_fault: float = 0.0     # MWL — Max Water Level during fault (≤+20mm above OF)
+    meniscus: float = 0.0      # Meniscus delta above OF (≤+5mm)
+    cwl: float = 0.0           # CWL — Critical WL 2s after cutoff (≤+10mm above OF)
+    overflow: float = 0.0      # OF — overflow level (absolute height mm)
+    water_discharge: float = 0.0
+    residual_wl: float = 0.0   # RWL — Residual Water Level (min after flush)
+
+    def to_dict(self):
+        d = {k: getattr(self, k) for k in
+             ["name", "mwl", "mwl_fault", "meniscus", "cwl", "overflow",
+              "water_discharge", "residual_wl"]}
+        d["points"] = [{"p": pt.p, "h": pt.h, "v": pt.v} for pt in self.points]
+        return d
+
+    @classmethod
+    def from_dict(cls, d):
+        pts = [CalibrationPoint(p=float(r.get("p", 0)), h=float(r.get("h", 0)),
+                                v=float(r.get("v", 0)))
+               for r in d.get("points", [])]
+        return cls(
+            name=d.get("name", "Untitled Profile"),
+            points=pts,
+            mwl=float(d.get("mwl", 0.0)),
+            mwl_fault=float(d.get("mwl_fault", 0.0)),
+            meniscus=float(d.get("meniscus", 0.0)),
+            cwl=float(d.get("cwl", 0.0)),
+            overflow=float(d.get("overflow", 0.0)),
+            water_discharge=float(d.get("water_discharge", 0.0)),
+            residual_wl=float(d.get("residual_wl", 0.0)),
+        )
+
+    def clone(self):
+        return replace(self, points=copy.deepcopy(self.points))
+
+
+# ── Pressure unit conversion ─────────────────────────────────────────
+PRESSURE_UNITS = {"bar": (1.0, "bar"), "mbar": (1000.0, "mbar"), "kPa": (100.0, "kPa")}
+
+def p_convert(bar_value, unit="bar"):
+    factor, _ = PRESSURE_UNITS.get(unit, (1.0, "bar"))
+    return bar_value * factor
+
+def p_format(bar_value, decimals=None, unit="bar"):
+    factor, label = PRESSURE_UNITS.get(unit, (1.0, "bar"))
+    val = bar_value * factor
+    if decimals is None:
+        decimals = 4 if unit == "bar" else 2 if unit == "kPa" else 1
+    return f"{val:.{decimals}f} {label}"
+
+def p_parse_to_bar(text, unit="bar"):
+    factor, _ = PRESSURE_UNITS.get(unit, (1.0, "bar"))
+    return float(text.replace(",", ".")) / factor
+
+
+# ── Smoothing ────────────────────────────────────────────────────────
+def smooth(data, alg):
+    # PERF-02: full O(N) rebuild on every chart refresh is acceptable at
+    # max_pts=12 000 and ≥100 ms interval. Switch SMA to running-sum if needed.
+    if alg == "None" or len(data) < 2:
+        return list(data)
+    r = []
+    if alg.startswith("SMA"):
+        w = int(alg.split("-")[1])
+        for i in range(len(data)):
+            s = max(0, i - w + 1)
+            r.append(sum(data[s:i+1]) / (i - s + 1))
+        return r
+    if alg.startswith("EMA"):
+        a = 0.2 if "Fast" in alg else 0.05
+        r.append(data[0])
+        for i in range(1, len(data)):
+            r.append(a * data[i] + (1 - a) * r[-1])
+        return r
+    return list(data)
+
+
+# ── Interpolation cache (pre-sorted + bisect) ────────────────────────
+_sorted_pts_cache: list = []
+_sorted_pts_pressures: list = []
+_interp_cache_version: int = 0
+_interp_expected_version: int = -1
+_interp_lock = threading.Lock()
+
+def _rebuild_interp_cache(pts):
+    """Pre-sort calibration points. Call on profile load/save/edit."""
+    global _sorted_pts_cache, _sorted_pts_pressures, _interp_cache_version
+    with _interp_lock:
+        _sorted_pts_cache = sorted(pts, key=lambda x: x.p)
+        _sorted_pts_pressures = [pt.p for pt in _sorted_pts_cache]
+        _interp_cache_version += 1
+
+def interp_hv(p_bar, pts):
+    global _interp_expected_version
+    if not pts:
+        return 0.0, 0.0
+    with _interp_lock:
+        if _interp_expected_version != _interp_cache_version:
+            _sorted_pts_cache[:] = sorted(pts, key=lambda x: x.p)
+            _sorted_pts_pressures[:] = [pt.p for pt in _sorted_pts_cache]
+            _interp_expected_version = _interp_cache_version
+        sp = _sorted_pts_cache
+        pressures = _sorted_pts_pressures
+    if len(sp) == 1:
+        return sp[0].h, sp[0].v
+    if p_bar <= sp[0].p:
+        d = sp[1].p - sp[0].p
+        r = (p_bar - sp[0].p) / d if d else 0
+        return sp[0].h + r*(sp[1].h - sp[0].h), sp[0].v + r*(sp[1].v - sp[0].v)
+    if p_bar >= sp[-1].p:
+        d = sp[-1].p - sp[-2].p
+        r = (p_bar - sp[-2].p) / d if d else 0
+        return sp[-2].h + r*(sp[-1].h - sp[-2].h), sp[-2].v + r*(sp[-1].v - sp[-2].v)
+    i = bisect.bisect_right(pressures, p_bar) - 1
+    i = max(0, min(i, len(sp) - 2))
+    d = sp[i+1].p - sp[i].p
+    r = (p_bar - sp[i].p) / d if d else 0
+    return sp[i].h + r*(sp[i+1].h - sp[i].h), sp[i].v + r*(sp[i+1].v - sp[i].v)
+
+
+# ── IFM AL1060 protocol ──────────────────────────────────────────────
+def build_request(port_idx):
+    payload = json.dumps({
+        "code": 10, "cid": 1, "adr": "/getdatamulti",
+        "data": {"datatosend": [f"/iolinkmaster/port[{port_idx}]/iolinkdevice/pdin"]}
+    })
+    return b'\x01\x0110' + f"{len(payload):08X}".encode() + payload.encode()
+
+
+# ── Application logic ────────────────────────────────────────────────
+class SensorApp:
+    def __init__(self):
+        self.conn_params, self.app_settings = load_settings()
+        for k, v in DEFAULT_CONN.items():
+            self.conn_params.setdefault(k, v)
+        for k, v in DEFAULT_APP.items():
+            self.app_settings.setdefault(k, v)
+
+        self.profile = CisternProfile()
+        _default = CONFIG_DIR / "default_profile.json"
+        if _default.exists():
+            try:
+                with open(_default, encoding="utf-8") as _f:
+                    self.profile = CisternProfile.from_dict(json.load(_f))
+            except Exception as e:
+                logging.warning(f"Could not load default profile, starting blank: {e}")
+        self.serial_conn = None
+        self.is_connected = False
+        self.is_logging = False
+        self.csv_file = None
+        self.csv_writer = None
+        self._csv_row_count = 0
+        self._csv_lock = threading.Lock()
+
+        self.last_error = ""
+        self.stop_event = threading.Event()
+        self.read_thread_obj = None
+        self.data_lock = threading.Lock()
+
+        self.max_pts = 12000
+        self.t_buf = collections.deque(maxlen=self.max_pts)
+        self.h_buf = collections.deque(maxlen=self.max_pts)
+        self.v_buf = collections.deque(maxlen=self.max_pts)
+        self.f_buf = collections.deque(maxlen=self.max_pts)
+
+        self.start_time = time.time()
+        self.current_pressure = 0.0
+        self.current_height = 0.0
+        self.current_volume = 0.0
+        self.current_flow = 0.0
+        self.current_temperature = None  # °C from pdin bytes 4-7; None if sensor doesn't report it
+
+        self.cwl_state = "IDLE"
+        self.cwl_peak = 0.0
+        self.cwl_timer = 0.0
+
+        self.cwl_auto_state = "IDLE"
+        self.cwl_auto_peak  = 0.0
+        self.cwl_auto_timer = 0.0
+
+        self._flush_lock = threading.Lock()
+        self.flush_measuring = False
+        self.flush_start_vol = 0.0
+        self.flush_start_h = 0.0
+        self.flush_start_time = 0.0
+        self.flush_results = []  # list of {type, vol, time, en14055_rate, temp_c}
+        self.flush_vol_history = []  # list of (timestamp, volume, height)
+        self.flush_min_h = float("inf")
+        self.flush_rising = False
+        self.flush_rising_timer = 0.0
+
+        self.click_points = []
+        self.last_t = []
+        self.last_y = []
+        self.chart_paused = False
+        self.manual_mwl_cwl_pending = False
+        self._last_ui_tick = 0
+        self._last_chart_tick = 0
+
+    # ── Sensor thread ───────────────────────────────────────────────
+    def read_thread(self):
+        rx_buf = bytearray()
+        try:
+            port_idx = int(self.conn_params["io_port"].replace("Port ", ""))
+        except ValueError:
+            port_idx = 1
+        poll_sleep = self.conn_params["poll_ms"] / 1000.0
+
+        while not self.stop_event.is_set():
+            t0 = time.time()
+            if self.serial_conn and self.serial_conn.is_open:
+                try:
+                    req = build_request(port_idx)
+                    self.serial_conn.write(req)
+                    time.sleep(min(0.02, poll_sleep / 2))
+
+                    avail = self.serial_conn.in_waiting
+                    if avail > 0:
+                        rx_buf.extend(self.serial_conn.read(avail))
+
+                    while b'\x01\x0110' in rx_buf:
+                        idx = rx_buf.find(b'\x01\x0110')
+                        if len(rx_buf) < idx + 12:
+                            break
+                        try:
+                            exp_len = int(rx_buf[idx+4:idx+12].decode(errors="ignore"), 16)
+                        except ValueError:
+                            rx_buf = rx_buf[idx+4:]
+                            continue
+
+                        pkt_len = 12 + exp_len
+                        if len(rx_buf) < idx + pkt_len:
+                            break
+
+                        j_str = rx_buf[idx+12:idx+pkt_len].decode(errors="ignore").strip()
+                        rx_buf = rx_buf[idx+pkt_len:]
+                        try:
+                            js = json.loads(j_str)
+                            pth = f"/iolinkmaster/port[{port_idx}]/iolinkdevice/pdin"
+                            pld = js.get("data", {}).get(pth, {})
+                            if pld.get("code") == 200:
+                                hx = pld.get("data", "")
+                                if len(hx) >= 8:
+                                    raw = struct.unpack(">I", bytes.fromhex(hx[:8]))[0]
+                                    p_bar = raw * _PRESSURE_SCALE_BAR_PER_LSB
+                                    if not (_PRESSURE_MIN_BAR <= p_bar <= _PRESSURE_MAX_BAR):
+                                        logging.debug(f"Pressure out of range: {p_bar:.4f} bar — sample discarded")
+                                        continue
+                                    h, v = interp_hv(p_bar, self.profile.points)
+                                    temp_c = None
+                                    if len(hx) >= _PDIN_TEMP_END:
+                                        raw_t = struct.unpack(">i", bytes.fromhex(hx[_PDIN_TEMP_OFFSET:_PDIN_TEMP_END]))[0]
+                                        temp_c = raw_t * _PDIN_TEMP_SCALE
+                                    with self.data_lock:
+                                        t = time.time() - self.start_time
+                                        f_rate = 0.0
+                                        if len(self.t_buf) > 5:
+                                            dt = t - self.t_buf[-5]
+                                            if dt > 0:
+                                                f_rate = (self.v_buf[-5] - v) / dt
+                                        self.current_pressure = p_bar
+                                        self.current_height = h
+                                        self.current_volume = v
+                                        self.current_flow = f_rate
+                                        if temp_c is not None:
+                                            self.current_temperature = temp_c
+                                        self.t_buf.append(t)
+                                        self.h_buf.append(h)
+                                        self.v_buf.append(v)
+                                        self.f_buf.append(f_rate)
+
+                                    if self.flush_measuring:
+                                        with self._flush_lock:
+                                            self.flush_vol_history.append(
+                                                (time.time(), v, h))
+                                            if h < self.flush_min_h:
+                                                self.flush_min_h = h
+
+                                    with self._csv_lock:
+                                        if self.is_logging and self.csv_writer:
+                                            unit = self.app_settings.get("pressure_unit", "bar")
+                                            t_str = f"{temp_c:.1f}" if temp_c is not None else ""
+                                            self.csv_writer.writerow([
+                                                datetime.now().isoformat(),
+                                                p_format(p_bar, unit=unit).split()[0],
+                                                f"{h:.1f}", f"{v:.2f}", f"{f_rate:.3f}", t_str
+                                            ])
+                                            self._csv_row_count += 1
+                                            if self.csv_file and self._csv_row_count % 50 == 0:
+                                                self.csv_file.flush()
+                        except (json.JSONDecodeError, struct.error, ValueError) as e:
+                            logging.debug(f"Parse error: {e}")
+
+                    if len(rx_buf) > _RX_BUF_HIGH_WATERMARK:
+                        marker = b'\x01\x0110'
+                        cut = rx_buf.find(marker, len(rx_buf) - _RX_BUF_LOW_WATERMARK)
+                        if cut != -1:
+                            rx_buf = rx_buf[cut:]
+                        else:
+                            logging.debug("RX buffer overflow: no sync marker found, resetting buffer")
+                            rx_buf = bytearray()
+                except serial.SerialException as e:
+                    logging.error(f"Serial read error: {e}")
+                    break
+                except OSError as e:
+                    logging.error(f"Port I/O error: {e}")
+                    break
+
+            elapsed = time.time() - t0
+            slp = poll_sleep - elapsed
+            if slp > 0:
+                time.sleep(slp)
+
+    # ── Connection ──────────────────────────────────────────────────
+    def connect(self):
+        if self.is_connected:
+            return
+        try:
+            self.serial_conn = serial.Serial(
+                self.conn_params["port"], self.conn_params["baud"], timeout=0.1)
+            self.is_connected = True
+            self.stop_event.clear()
+            self.start_time = time.time()
+            with self.data_lock:
+                self.t_buf.clear()
+                self.h_buf.clear()
+                self.v_buf.clear()
+                self.f_buf.clear()
+            self.read_thread_obj = threading.Thread(target=self.read_thread, daemon=True)
+            self.read_thread_obj.start()
+        except serial.SerialException as e:
+            self.is_connected = False
+            self.last_error = f"Connection failed: {e}"
+            logging.error(self.last_error)
+        except OSError as e:
+            self.is_connected = False
+            self.last_error = f"Port error: {e}"
+            logging.error(self.last_error)
+
+    def disconnect(self):
+        if not self.is_connected:
+            return
+        self.stop_event.set()
+        if self.read_thread_obj:
+            join_timeout = max(3.0, self.conn_params.get("poll_ms", 1000) / 1000.0 + 1.0)
+            self.read_thread_obj.join(timeout=join_timeout)
+            if self.read_thread_obj.is_alive():
+                logging.warning("Sensor thread did not exit within join timeout")
+        if self.serial_conn:
+            try:
+                self.serial_conn.close()
+            except Exception as e:
+                logging.warning(f"Error closing serial port: {e}")
+        self.is_connected = False
+        self.serial_conn = None
+
+    # ── Helpers ─────────────────────────────────────────────────────
+    def get_avg_height(self):
+        window = self.app_settings.get("avg_window", 0.5)
+        with self.data_lock:
+            if not self.h_buf:
+                return self.current_height
+            now = self.t_buf[-1]
+            vals = []
+            for t, h in zip(reversed(self.t_buf), reversed(self.h_buf)):
+                if now - t > window:
+                    break
+                vals.append(h)
+            return sum(vals) / len(vals) if vals else self.current_height
+
+    def recalc_from_pressure(self):
+        """Re-interpolate h/v from current pressure after calibration change."""
+        if self.profile.points:
+            h, v = interp_hv(self.current_pressure, self.profile.points)
+            with self.data_lock:
+                self.current_height = h
+                self.current_volume = v
+
+    def tick_rwl(self, h: float, h_history: list) -> bool:
+        """Detect Residual Water Level — minimum height after a flush.
+        Returns True when detection is complete."""
+        if self.cwl_state == "ARMED":
+            if self.app_settings.get("cwl_mode") == "Automatic":
+                alg = self.app_settings.get("cwl_smooth", "None")
+                sm_h = smooth(h_history, alg)
+                val = sm_h[-1] if sm_h else h
+                if val > self.cwl_peak:
+                    self.cwl_peak = val
+                thresh = self.app_settings.get("cwl_drop_thresh", 1.5)
+                if self.cwl_peak - val >= thresh:
+                    self.cwl_state = "WAITING"
+                    self.cwl_timer = time.time()
+        elif self.cwl_state == "WAITING":
+            if time.time() - self.cwl_timer >= 2.0:
+                self.profile.residual_wl = self.get_avg_height()
+                self.cwl_state = "DONE"
+                return True
+        return False
+
+    def tick_cwl_auto(self, h: float,
+                      h_history: list, t_history: list) -> bool:
+        """Auto-detect CWL per EN 14055 §5.3.4.
+        Returns True when CWL is captured."""
+        alg = self.app_settings.get("cwl_smooth", "SMA-5")
+
+        if self.cwl_auto_state == "ARMED":
+            sm = smooth(h_history, alg)
+            val = sm[-1] if sm else h
+            if val > self.cwl_auto_peak:
+                self.cwl_auto_peak = val
+            if self.cwl_auto_peak - val >= 1.5:
+                drop_start_wall = time.time()
+                if h_history and t_history:
+                    sm_full = smooth(h_history, alg)
+                    n = min(len(sm_full), len(t_history))
+                    for i in range(n - 1, -1, -1):
+                        if sm_full[i] >= self.cwl_auto_peak - 0.5:
+                            elapsed_now  = time.time() - self.start_time
+                            elapsed_drop = t_history[i]
+                            drop_start_wall = time.time() - (elapsed_now - elapsed_drop)
+                            break
+                self.cwl_auto_timer = drop_start_wall
+                self.cwl_auto_state = "WAITING"
+
+        elif self.cwl_auto_state == "WAITING":
+            if time.time() - self.cwl_auto_timer >= 2.0:
+                self.profile.cwl = self.get_avg_height()
+                self.profile.mwl_fault = self.cwl_auto_peak
+                self.cwl_auto_state = "DONE"
+                return True
+
+        return False
+
+    def cleanup(self):
+        save_settings(self.conn_params, self.app_settings)
+        self.disconnect()
+        with self._csv_lock:
+            if self.csv_file:
+                try:
+                    self.csv_file.close()
+                except OSError as e:
+                    logging.warning(f"CSV close on exit: {e}")
+                finally:
+                    self.csv_file = None
+                    self.csv_writer = None
+
+
+# ── EN 14055 compliance checks (pure logic, no GUI) ──────────────────
+def run_compliance_checks(
+    profile: CisternProfile,
+    flush_results: list,
+) -> tuple[list[str], float | None]:
+    """Pure EN 14055 compliance logic.
+
+    Returns:
+        results      — list of '[PASS]/[FAIL]/[WARN]/[INFO]/[----]' strings
+        air_gap_auto — computed air gap in mm, or None if not computable
+    """
+    p = profile
+    results = []
+
+    # 1. Safety Margin c: OF − NWL ≥ 20 mm (§5.2.6)
+    if p.overflow > 0 and p.mwl > 0:
+        sm = p.overflow - p.mwl
+        if sm >= 20:
+            results.append(f"[PASS] Safety margin c (OF−NWL): {sm:.1f} mm ≥ 20 mm")
+        else:
+            results.append(f"[FAIL] Safety margin c (OF−NWL): {sm:.1f} mm < 20 mm")
+    else:
+        results.append("[----] Safety margin c: capture NWL and set Overflow first")
+
+    # 2. MWL − OF ≤ 20 mm (§5.2.4a)
+    if p.overflow > 0 and p.mwl_fault > 0:
+        diff = p.mwl_fault - p.overflow
+        if diff <= 20:
+            results.append(f"[PASS] MWL fault: +{diff:.1f} mm above OF ≤ 20 mm")
+        else:
+            results.append(f"[FAIL] MWL fault: +{diff:.1f} mm above OF > 20 mm")
+    else:
+        results.append("[----] MWL fault: run overflow fault test and press 'Set MWL (fault)'")
+
+    # 3. CWL − OF ≤ 10 mm (§5.2.4b)
+    if p.overflow > 0 and p.cwl > 0:
+        diff = p.cwl - p.overflow
+        if diff <= 10:
+            results.append(f"[PASS] CWL: {diff:+.1f} mm from OF ≤ 10 mm")
+        else:
+            results.append(f"[FAIL] CWL: +{diff:.1f} mm above OF > 10 mm")
+    else:
+        results.append("[----] CWL: run fault test, cut supply, wait 2s, press 'Set CWL'")
+
+    # 4. Meniscus − OF ≤ 5 mm (§5.2.4c)
+    if p.meniscus != 0:
+        m = p.meniscus
+        if 0 <= m <= 5:
+            results.append(f"[PASS] Meniscus: +{m:.1f} mm above OF ≤ 5 mm")
+        elif m > 5:
+            results.append(f"[FAIL] Meniscus: +{m:.1f} mm above OF > 5 mm")
+        else:
+            results.append(f"[WARN] Meniscus: {m:.1f} mm (below OF — check capture)")
+    else:
+        results.append("[----] Meniscus: let cistern overflow, stabilise, press 'Set Meniscus'")
+
+    # 5. Air gap a: water_discharge − CWL ≥ 20 mm (§5.2.7)
+    air_gap_auto: float | None = None
+    if p.water_discharge > 0 and p.cwl > 0:
+        air_gap_auto = p.water_discharge - p.cwl
+        if air_gap_auto >= 20:
+            results.append(f"[PASS] Air gap a (§5.2.7): {air_gap_auto:.1f} mm (WD−CWL) ≥ 20 mm")
+        else:
+            results.append(f"[FAIL] Air gap a (§5.2.7): {air_gap_auto:.1f} mm (WD−CWL) < 20 mm")
+
+    # 6. Residual WL (informational)
+    if p.residual_wl > 0:
+        results.append(f"[INFO] Residual WL (RWL): {p.residual_wl:.1f} mm after flush")
+
+    # 7. Flush volume (§5.2.1, §6.5)
+    if flush_results:
+        full = [r for r in flush_results if "Full" in r["type"]]
+        part = [r for r in flush_results if "Part" in r["type"]]
+        if full:
+            if len(full) < EN14055_REQUIRED_FLUSH_COUNT:
+                results.append(f"[WARN] Full flush: only {len(full)}/{EN14055_REQUIRED_FLUSH_COUNT} measurements (§5.2.1 requires 3)")
+            avg_full = sum(r["vol"] for r in full) / len(full)
+            tag = "PASS" if avg_full <= EN14055_FULL_FLUSH_MAX_L else "FAIL"
+            results.append(f"[{tag}] Full flush avg: {avg_full:.2f} L (limit {EN14055_FULL_FLUSH_MAX_L} L)")
+            en_rates = [r["en14055_rate"] for r in full if r.get("en14055_rate") is not None]
+            if en_rates:
+                avg_rate = sum(en_rates) / len(en_rates)
+                results.append(f"[INFO] Full flush EN14055 flow rate (V2 method): {avg_rate:.3f} L/s")
+            temps = [r["temp_c"] for r in full if r.get("temp_c") is not None]
+            if temps:
+                results.append(f"[INFO] Water temp during full flushes: {min(temps):.1f}–{max(temps):.1f} °C (EN 14055 §5.1: 15±5 °C)")
+        if part:
+            if len(part) < EN14055_REQUIRED_FLUSH_COUNT:
+                results.append(f"[WARN] Part flush: only {len(part)}/{EN14055_REQUIRED_FLUSH_COUNT} measurements (§5.2.1 requires 3)")
+            avg_part = sum(r["vol"] for r in part) / len(part)
+            tag = "PASS" if avg_part <= EN14055_PART_FLUSH_MAX_L else "FAIL"
+            results.append(f"[{tag}] Part flush avg: {avg_part:.2f} L (limit {EN14055_PART_FLUSH_MAX_L} L)")
+    else:
+        results.append("[----] Flush volume: no measurements yet")
+
+    return results, air_gap_auto
