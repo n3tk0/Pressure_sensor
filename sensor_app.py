@@ -26,6 +26,31 @@ from datetime import datetime
 
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s")
 
+# ── Named constants ──────────────────────────────────────────────────
+# IFM PI1789 protocol
+_PRESSURE_SCALE_BAR_PER_LSB: float = 0.0001
+_PRESSURE_MIN_BAR: float = 0.0
+_PRESSURE_MAX_BAR: float = 10.0        # PI1789 rated range (0–10 bar)
+_PACKET_HEADER_SIZE: int = 12          # 2 SOF + 8 length hex + 2 reserved
+_RX_BUF_HIGH_WATERMARK: int = 4000
+_RX_BUF_LOW_WATERMARK: int = 2000
+
+# EN 14055:2015
+EN14055_CWL_WAIT_S: float = 2.0
+EN14055_SAFETY_MARGIN_MIN_MM: float = 20.0
+EN14055_MWL_MAX_ABOVE_OF_MM: float = 20.0
+EN14055_CWL_MAX_ABOVE_OF_MM: float = 10.0
+EN14055_MENISCUS_MAX_ABOVE_OF_MM: float = 5.0
+EN14055_FULL_FLUSH_MAX_L: float = 6.0
+EN14055_PART_FLUSH_MAX_L: float = 4.0
+EN14055_REQUIRED_FLUSH_COUNT: int = 3
+EN14055_CWL_DROP_THRESH_MM: float = 1.5   # default drop to detect supply cutoff
+EN14055_FLUSH_MIN_DURATION_S: float = 3.0 # guard before auto-stop is considered
+EN14055_FLUSH_RISE_THRESH_MM: float = 5.0 # rise above min to detect refill start
+EN14055_FLUSH_RISE_CONFIRM_S: float = 2.0 # seconds rising before auto-stop fires
+EN14055_CWL_HISTORY_SAMPLES: int = 150    # sliding window depth for CWL/RWL detector
+EN14055_MAX_CAL_FILE_BYTES: int = 10 * 1024 * 1024  # 10 MB import guard
+
 # ── Runtime base directory (works both as .py and as single-file exe) ──
 # auto-py-to-exe / PyInstaller sets sys.frozen; sys.executable is the .exe path.
 if getattr(sys, "frozen", False):
@@ -213,13 +238,16 @@ def interp_hv(p_bar, pts):
     global _interp_expected_version
     if not pts:
         return 0.0, 0.0
-    # Rebuild cache if stale (e.g. profile changed between calls)
+    # BUG-06 fix: capture reference to the cache lists *inside* the lock so
+    # we never dereference a name that has been rebound by _rebuild_interp_cache
+    # on another thread (safe in CPython today; required for free-threaded Python).
     with _interp_lock:
         if _interp_expected_version != _interp_cache_version:
             _sorted_pts_cache[:] = sorted(pts, key=lambda x: x["p"])
             _sorted_pts_pressures[:] = [pt["p"] for pt in _sorted_pts_cache]
             _interp_expected_version = _interp_cache_version
-    sp = _sorted_pts_cache
+        sp = _sorted_pts_cache          # captured inside lock
+        pressures = _sorted_pts_pressures
     if len(sp) == 1:
         return sp[0]["h"], sp[0]["v"]
     if p_bar <= sp[0]["p"]:
@@ -230,7 +258,7 @@ def interp_hv(p_bar, pts):
         d = sp[-1]["p"] - sp[-2]["p"]
         r = (p_bar - sp[-2]["p"]) / d if d else 0
         return sp[-2]["h"] + r * (sp[-1]["h"] - sp[-2]["h"]), sp[-2]["v"] + r * (sp[-1]["v"] - sp[-2]["v"])
-    i = bisect.bisect_right(_sorted_pts_pressures, p_bar) - 1
+    i = bisect.bisect_right(pressures, p_bar) - 1
     i = max(0, min(i, len(sp) - 2))
     d = sp[i+1]["p"] - sp[i]["p"]
     r = (p_bar - sp[i]["p"]) / d if d else 0
@@ -263,7 +291,7 @@ class SensorApp:
         _default = CONFIG_DIR / "default_profile.json"
         if _default.exists():
             try:
-                with open(_default) as _f:
+                with open(_default, encoding="utf-8") as _f:
                     self.profile.from_dict(json.load(_f))
             except Exception as e:
                 logging.warning(f"Could not load default profile, starting blank: {e}")
@@ -302,17 +330,22 @@ class SensorApp:
         self.cwl_auto_timer = 0.0     # wall-clock time of supply-cutoff moment
 
         # EN 14055 flush volume measurement
+        # EN 14055 flush — all fields protected by _flush_lock
+        self._flush_lock = threading.Lock()
         self.flush_measuring = False
         self.flush_start_vol = 0.0
         self.flush_start_h = 0.0
         self.flush_start_time = 0.0
-        self.flush_results = []  # list of {type, vol, time, en14055_rate}
+        self.flush_results = []  # list of {type, vol, time, en14055_rate, temp_c}
         # History for EN14055 effective flow rate (ignore first 1L, last 2L)
         self.flush_vol_history = []  # list of (timestamp, volume, height)
         # Auto-stop state: track minimum height during flush
         self.flush_min_h = float("inf")
         self.flush_rising = False
         self.flush_rising_timer = 0.0
+
+        # UI theme tracking — keyed by DPG item tag
+        self._item_themes: dict[str, str] = {}
 
         self.click_points = []
         self.last_t = []
@@ -366,8 +399,13 @@ class SensorApp:
                             if pld.get("code") == 200:
                                 hx = pld.get("data", "")
                                 if len(hx) >= 8:
-                                    raw = struct.unpack(">i", bytes.fromhex(hx[:8]))[0]
-                                    p_bar = raw * 0.0001
+                                    # BUG-03 fix: unsigned decode (PI1789 uses unsigned 32-bit)
+                                    raw = struct.unpack(">I", bytes.fromhex(hx[:8]))[0]
+                                    p_bar = raw * _PRESSURE_SCALE_BAR_PER_LSB
+                                    if not (_PRESSURE_MIN_BAR <= p_bar <= _PRESSURE_MAX_BAR):
+                                        logging.debug(f"Pressure out of range: {p_bar:.4f} bar — sample discarded")
+                                        rx_buf = rx_buf[idx+pkt_len:]
+                                        continue
                                     h, v = interp_hv(p_bar, self.profile.points)
                                     # Temperature from bytes 4-7 of pdin (PI1789: 0.1°C/LSB)
                                     temp_c = None
@@ -380,6 +418,9 @@ class SensorApp:
                                         if len(self.t_buf) > 5:
                                             dt = t - self.t_buf[-5]
                                             if dt > 0:
+                                                # Positive = outflow (volume decreasing).
+                                                # Negate to match the intuitive convention
+                                                # (positive = inflow / refill).
                                                 f_rate = (self.v_buf[-5] - v) / dt
                                         self.current_pressure = p_bar
                                         self.current_height = h
@@ -393,11 +434,13 @@ class SensorApp:
                                         self.f_buf.append(f_rate)
 
                                     # Track flush history for EN14055 flow rate calc
+                                    # BUG-01 fix: protect flush state with _flush_lock
                                     if self.flush_measuring:
-                                        self.flush_vol_history.append(
-                                            (time.time(), v, h))
-                                        if h < self.flush_min_h:
-                                            self.flush_min_h = h
+                                        with self._flush_lock:
+                                            self.flush_vol_history.append(
+                                                (time.time(), v, h))
+                                            if h < self.flush_min_h:
+                                                self.flush_min_h = h
 
                                     with self._csv_lock:
                                         if self.is_logging and self.csv_writer:
@@ -414,9 +457,17 @@ class SensorApp:
                         except (json.JSONDecodeError, struct.error, ValueError) as e:
                             logging.debug(f"Parse error: {e}")
 
-                    if len(rx_buf) > 4000:
-                        cut = rx_buf.find(b'\x01\x0110', len(rx_buf) - 2000)
-                        rx_buf = rx_buf[cut:] if cut != -1 else rx_buf[-2000:]
+                    # BUG-04 fix: search for sync marker before trimming so we
+                    # never retain a partial packet at the start of the buffer.
+                    if len(rx_buf) > _RX_BUF_HIGH_WATERMARK:
+                        marker = b'\x01\x0110'
+                        cut = rx_buf.find(marker, len(rx_buf) - _RX_BUF_LOW_WATERMARK)
+                        if cut != -1:
+                            rx_buf = rx_buf[cut:]
+                        else:
+                            # No marker in retained region — drop everything and resync
+                            logging.debug("RX buffer overflow: no sync marker found, resetting buffer")
+                            rx_buf = bytearray()
                 except serial.SerialException as e:
                     logging.error(f"Serial read error: {e}")
                     break
@@ -460,7 +511,12 @@ class SensorApp:
             return
         self.stop_event.set()
         if self.read_thread_obj:
-            self.read_thread_obj.join(timeout=3.0)
+            # BUG-05 fix: derive timeout from configured poll_ms so we always
+            # wait long enough for the thread to wake from its sleep.
+            join_timeout = max(3.0, self.conn_params.get("poll_ms", 1000) / 1000.0 + 1.0)
+            self.read_thread_obj.join(timeout=join_timeout)
+            if self.read_thread_obj.is_alive():
+                logging.warning("Sensor thread did not exit within join timeout")
         if self.serial_conn:
             try:
                 self.serial_conn.close()
@@ -579,9 +635,16 @@ class SensorApp:
 
     def cleanup(self):
         save_settings(self.conn_params, self.app_settings)
-        self.disconnect()
-        if self.csv_file:
-            self.csv_file.close()
+        self.disconnect()  # joins sensor thread before we touch the file
+        with self._csv_lock:
+            if self.csv_file:
+                try:
+                    self.csv_file.close()
+                except OSError as e:
+                    logging.warning(f"CSV close on exit: {e}")
+                finally:
+                    self.csv_file = None
+                    self.csv_writer = None
 
 # ── GUI ─────────────────────────────────────────────────────────────
 app = SensorApp()
@@ -759,33 +822,42 @@ def _delete_flush_row(sender, app_data, user_data):
 def _toggle_flush_measure():
     """Start/stop flush volume measurement (EN 14055 clause 6)."""
     if not app.flush_measuring:
-        app.flush_measuring = True
-        app.flush_start_vol = app.current_volume
-        app.flush_start_h = app.current_height
-        app.flush_start_time = time.time()
-        app.flush_vol_history = []
-        app.flush_min_h = float("inf")
-        app.flush_rising = False
-        app.flush_rising_timer = 0.0
+        # BUG-01 fix: initialise flush state under _flush_lock so the sensor
+        # thread cannot append to flush_vol_history while we are clearing it.
+        with app._flush_lock:
+            app.flush_start_vol = app.current_volume
+            app.flush_start_h = app.current_height
+            app.flush_start_time = time.time()
+            app.flush_vol_history = []
+            app.flush_min_h = float("inf")
+            app.flush_rising = False
+            app.flush_rising_timer = 0.0
+            app.flush_measuring = True   # set last — sensor thread starts appending
         dpg.set_item_label("btn_flush", "Stop Flush Measurement")
         dpg.bind_item_theme("btn_flush", "theme_btn_danger")
     else:
-        app.flush_measuring = False
-        elapsed = time.time() - app.flush_start_time
-        history = app.flush_vol_history
+        # BUG-01 fix: stop the sensor thread from appending, then snapshot history.
+        with app._flush_lock:
+            app.flush_measuring = False          # sensor thread sees False immediately
+            history = list(app.flush_vol_history)  # snapshot
+            elapsed = time.time() - app.flush_start_time
+            start_vol = app.flush_start_vol
         flush_type = dpg.get_value("combo_flush_type") if dpg.does_item_exist("combo_flush_type") else "Full Flush"
+        # EN-05: snapshot temperature at flush end for compliance report
+        snap_temp = app.current_temperature
 
         # Total volume = start minus the minimum volume seen (lowest water level)
         if history:
             min_vol = min(r[1] for r in history)
-            delta_vol = abs(app.flush_start_vol - min_vol)
+            delta_vol = abs(start_vol - min_vol)
         else:
-            delta_vol = abs(app.flush_start_vol - app.current_volume)
+            delta_vol = abs(start_vol - app.current_volume)
 
         # EN 14055 effective flow rate: skip first 1L and last 2L
         en14055_rate = None
+        en14055_note = None
         if history and delta_vol > 3.0:
-            v_start = app.flush_start_vol
+            v_start = start_vol
             v_skip_start = v_start - 1.0   # after 1L lost (volume threshold)
             # end vol = lowest volume seen
             v_end = min(r[1] for r in history)
@@ -797,11 +869,18 @@ def _toggle_flush_measure():
             if t1 and t2 and t2 > t1:
                 eff_vol = v_skip_start - v_skip_end
                 eff_time = t2 - t1
-                en14055_rate = eff_vol / eff_time if eff_time > 0 else None
+                if eff_time > 0:
+                    en14055_rate = eff_vol / eff_time
+                else:
+                    en14055_note = "N/A (flush window too short)"
+            else:
+                en14055_note = "N/A (flush too short for skip-window)"
 
         app.flush_results.append({
             "type": flush_type, "vol": delta_vol,
-            "time": elapsed, "en14055_rate": en14055_rate
+            "time": elapsed, "en14055_rate": en14055_rate,
+            "en14055_note": en14055_note,
+            "temp_c": snap_temp,   # EN-05: temperature at measurement time
         })
         dpg.set_item_label("btn_flush", "Start Flush Measurement")
         dpg.bind_item_theme("btn_flush", "theme_btn_success")
@@ -897,30 +976,41 @@ def _check_compliance():
         full = [r for r in app.flush_results if "Full" in r["type"]]
         part = [r for r in app.flush_results if "Part" in r["type"]]
         if full:
+            # EN-02: warn if fewer than the required 3 measurements
+            if len(full) < EN14055_REQUIRED_FLUSH_COUNT:
+                results.append(f"[WARN] Full flush: only {len(full)}/{EN14055_REQUIRED_FLUSH_COUNT} measurements (§5.2.1 requires 3)")
             avg_full = sum(r["vol"] for r in full) / len(full)
-            tag = "PASS" if avg_full <= 6.0 else "WARN"
-            results.append(f"[{tag}] Full flush avg: {avg_full:.2f} L (limit 6.0 L)")
+            # EN-01 fix: exceeding the volume limit is a FAIL, not a WARN
+            tag = "PASS" if avg_full <= EN14055_FULL_FLUSH_MAX_L else "FAIL"
+            results.append(f"[{tag}] Full flush avg: {avg_full:.2f} L (limit {EN14055_FULL_FLUSH_MAX_L} L)")
             en_rates = [r["en14055_rate"] for r in full if r.get("en14055_rate") is not None]
             if en_rates:
                 avg_rate = sum(en_rates) / len(en_rates)
                 results.append(f"[INFO] Full flush EN14055 flow rate (V2 method): {avg_rate:.3f} L/s")
+            # EN-05: report temperature range across flush measurements
+            temps = [r["temp_c"] for r in full if r.get("temp_c") is not None]
+            if temps:
+                results.append(f"[INFO] Water temp during full flushes: {min(temps):.1f}–{max(temps):.1f} °C (EN 14055 §5.1: 15±5 °C)")
         if part:
+            if len(part) < EN14055_REQUIRED_FLUSH_COUNT:
+                results.append(f"[WARN] Part flush: only {len(part)}/{EN14055_REQUIRED_FLUSH_COUNT} measurements (§5.2.1 requires 3)")
             avg_part = sum(r["vol"] for r in part) / len(part)
-            tag = "PASS" if avg_part <= 4.0 else "WARN"
-            results.append(f"[{tag}] Part flush avg: {avg_part:.2f} L (limit 4.0 L)")
+            tag = "PASS" if avg_part <= EN14055_PART_FLUSH_MAX_L else "FAIL"
+            results.append(f"[{tag}] Part flush avg: {avg_part:.2f} L (limit {EN14055_PART_FLUSH_MAX_L} L)")
     else:
         results.append("[----] Flush volume: no measurements yet")
 
-    # Show in dialog
+    # Show in dialog — CQ-09: use a scrollable child window so content never overflows
     if dpg.does_item_exist("dlg_comply"):
         dpg.delete_item("dlg_comply")
     with dpg.window(label="EN 14055 Compliance Check", modal=True, tag="dlg_comply",
-                     width=520, height=400, no_resize=True, pos=[340, 200]):
-        for line in results:
-            col = (COL_GREEN  if "[PASS]" in line else
-                   COL_RED    if "[FAIL]" in line else
-                   COL_ORANGE if "[WARN]" in line else COL_GRAY)
-            dpg.add_text(line, color=col)
+                     width=560, height=440, no_resize=True, pos=[320, 180]):
+        with dpg.child_window(height=370, border=False):
+            for line in results:
+                col = (COL_GREEN  if "[PASS]" in line else
+                       COL_RED    if "[FAIL]" in line else
+                       COL_ORANGE if "[WARN]" in line else COL_GRAY)
+                dpg.add_text(line, color=col)
         dpg.add_separator()
         dpg.add_button(label="Close", width=120,
                        callback=lambda: dpg.delete_item("dlg_comply"))
@@ -1006,10 +1096,10 @@ def _toggle_log():
     if not app.is_logging:
         EXPORT_DIR.mkdir(exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        safe_name = re.sub(r'[^\w\-]', '_', app.profile.name)
+        safe_name = re.sub(r'[^\w\-]', '_', app.profile.name)[:80]   # SEC-01: length cap
         fn = str(EXPORT_DIR / f"{safe_name}_{ts}.csv")
         try:
-            app.csv_file = open(fn, "w", newline="")
+            app.csv_file = open(fn, "w", newline="", encoding="utf-8")   # CQ-04: explicit encoding
             app.csv_writer = csv.writer(app.csv_file)
             _pu = PRESSURE_UNITS.get(app.app_settings.get("pressure_unit", "bar"), (1.0, "bar"))[1]
             app.csv_writer.writerow(["Timestamp", f"P({_pu})", "H(mm)", "V(L)", "F(L/s)", "T(C)"])
@@ -1020,14 +1110,23 @@ def _toggle_log():
             logging.warning(f"Failed to open CSV log: {e}")
             _show_toast(f"Log failed: {e}")
     else:
+        # BUG-02 fix: set flag first so the sensor thread stops writing,
+        # then acquire the lock to wait for any in-flight write to finish
+        # before closing the underlying file.
         app.is_logging = False
         dpg.set_item_label("btn_log", "Start Data Log (CSV)")
         dpg.bind_item_theme("btn_log", "theme_btn_success")
-        if app.csv_file:
-            app.csv_file.close()
-            app.csv_file = None
-            app.csv_writer = None
-            app._csv_row_count = 0
+        with app._csv_lock:
+            if app.csv_file:
+                try:
+                    app.csv_file.flush()
+                    app.csv_file.close()
+                except OSError as e:
+                    logging.warning(f"CSV close error: {e}")
+                finally:
+                    app.csv_file = None
+                    app.csv_writer = None
+                    app._csv_row_count = 0
 
 def _toggle_pause():
     app.chart_paused = not app.chart_paused
@@ -1159,7 +1258,7 @@ def _export_screenshot():
     """Save a PNG of the entire viewport to the exports folder."""
     EXPORT_DIR.mkdir(exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    safe_name = re.sub(r'[^\w\-]', '_', app.profile.name)
+    safe_name = re.sub(r'[^\w\-]', '_', app.profile.name)[:80]   # SEC-01
     filename = str(EXPORT_DIR / f"{safe_name}_{ts}.png")
     try:
         dpg.output_frame_buffer(filename)
@@ -1259,13 +1358,21 @@ def _open_calibration_dlg():
         except ValueError:
             return
         if p < 0 or h < 0 or v < 0:
+            _show_toast("⚠ Values must be non-negative.")
             return
-        if _cal_edit_idx[0] is not None and 0 <= _cal_edit_idx[0] < len(clone.points):
-            clone.points[_cal_edit_idx[0]] = {"p": p, "h": h, "v": v}
+        # BUG-09: reject duplicate pressure values (would cause division-by-zero in interp_hv)
+        edit_idx = _cal_edit_idx[0]
+        for i, pt in enumerate(clone.points):
+            if i != edit_idx and abs(pt["p"] - p) < 1e-9:
+                _show_toast("⚠ Duplicate pressure value — adjust and retry.")
+                return
+        if edit_idx is not None and 0 <= edit_idx < len(clone.points):
+            clone.points[edit_idx] = {"p": p, "h": h, "v": v}
             _cal_edit_idx[0] = None
             dpg.set_item_label("btn_cal_add", "Add Point")
         else:
             clone.points.append({"p": p, "h": h, "v": v})
+            _cal_edit_idx[0] = None
         dpg.set_value("cal_p", "")
         dpg.set_value("cal_h", "")
         dpg.set_value("cal_v", "")
@@ -1352,7 +1459,7 @@ def _open_calibration_dlg():
 def _cal_export_json(profile_clone):
     """Export calibration points as JSON to exports folder."""
     EXPORT_DIR.mkdir(exist_ok=True)
-    safe = re.sub(r'[^\w\-]', '_', profile_clone.name)
+    safe = re.sub(r'[^\w\-]', '_', profile_clone.name)[:80]   # SEC-01
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     fp = EXPORT_DIR / f"{safe}_cal_points_{ts}.json"
     try:
@@ -1377,31 +1484,45 @@ def _cal_import_cb(sender, app_data, profile_clone, refresh_fn):
         return
     try:
         fp = Path(fp)
+        # SEC-02: guard against enormous files
+        if fp.stat().st_size > EN14055_MAX_CAL_FILE_BYTES:
+            _show_toast(f"⚠ File too large (>{EN14055_MAX_CAL_FILE_BYTES // (1024*1024)} MB) — import rejected")
+            return
         new_pts = []
+        skipped = 0
         if fp.suffix.lower() == ".csv":
-            with open(fp, newline="") as f:
+            with open(fp, newline="", encoding="utf-8") as f:   # CQ-04
                 reader = csv.DictReader(f)
                 for row in reader:
-                    new_pts.append({
-                        "p": float(row.get("P_bar", row.get("p", 0))),
-                        "h": float(row.get("H_mm",  row.get("h", 0))),
-                        "v": float(row.get("Vol_L",  row.get("v", 0))),
-                    })
+                    p = float(row.get("P_bar", row.get("p", 0)))
+                    h = float(row.get("H_mm",  row.get("h", 0)))
+                    v = float(row.get("Vol_L",  row.get("v", 0)))
+                    # CQ-07: reject NaN / Inf values
+                    if not all(math.isfinite(x) for x in (p, h, v)):
+                        skipped += 1
+                        continue
+                    new_pts.append({"p": p, "h": h, "v": v})
         else:  # JSON
-            with open(fp) as f:
+            with open(fp, encoding="utf-8") as f:               # CQ-04
                 data = json.load(f)
             raw = data if isinstance(data, list) else data.get("points", [])
             for row in raw:
-                new_pts.append({
-                    "p": float(row.get("p", 0)),
-                    "h": float(row.get("h", 0)),
-                    "v": float(row.get("v", 0)),
-                })
+                p = float(row.get("p", 0))
+                h = float(row.get("h", 0))
+                v = float(row.get("v", 0))
+                if not all(math.isfinite(x) for x in (p, h, v)):
+                    skipped += 1
+                    continue
+                new_pts.append({"p": p, "h": h, "v": v})
         profile_clone.points = new_pts
         refresh_fn()
-        _show_toast(f"Imported {len(new_pts)} points from {fp.name}")
+        msg = f"Imported {len(new_pts)} points from {fp.name}"
+        if skipped:
+            msg += f" ({skipped} invalid row(s) skipped)"
+        _show_toast(msg)
     except Exception as e:
         logging.error(f"Cal import failed: {e}")
+        _show_toast(f"⚠ Import failed: {e}")
 
 def _open_program_dlg():
     if dpg.does_item_exist("dlg_prog"):
@@ -1426,7 +1547,7 @@ def _open_program_dlg():
         dpg.add_combo(["0.5", "1.0", "1.5", "2.0", "5.0"],
                        default_value=str(s.get("cwl_drop_thresh", 1.5)), tag="dlg_p_thresh", width=-1)
         dpg.add_text("CWL Smooth:")
-        dpg.add_combo(["None", "SMA-5", "SMA-20", "EMA-Fast"],
+        dpg.add_combo(["None", "SMA-5", "SMA-20", "EMA-Fast", "EMA-Slow"],
                        default_value=s.get("cwl_smooth", "SMA-5"), tag="dlg_p_smth", width=-1)
         dpg.add_text("UI Refresh (ms):")
         dpg.add_combo(["20", "50", "100"],
@@ -1524,7 +1645,7 @@ def _load_profile_cb(sender, app_data):
     fp = app_data.get("file_path_name", "")
     if fp:
         try:
-            with open(fp) as f:
+            with open(fp, encoding="utf-8") as f:
                 app.profile.from_dict(json.load(f))
             _rebuild_interp_cache(app.profile.points)
             app.recalc_from_pressure()
@@ -1536,7 +1657,7 @@ def _save_profile_cb(sender, app_data):
     fp = app_data.get("file_path_name", "")
     if fp:
         try:
-            with open(fp, "w") as f:
+            with open(fp, "w", encoding="utf-8") as f:
                 json.dump(app.profile.to_dict(), f, indent=4)
         except OSError as e:
             logging.error(f"Failed to save profile: {e}")
@@ -1561,7 +1682,7 @@ def _save_as_default_profile():
     CONFIG_DIR.mkdir(exist_ok=True)
     fp = CONFIG_DIR / "default_profile.json"
     try:
-        with open(fp, "w") as f:
+        with open(fp, "w", encoding="utf-8") as f:
             json.dump(app.profile.to_dict(), f, indent=4)
         _show_toast(f"Default profile set: {app.profile.name}")
     except OSError as e:
@@ -1612,8 +1733,8 @@ def _bind_status(item: str, base_tag: str):
     if not dpg.does_item_exist(tag):
         tag = base_tag          # fall back to dark if light variant missing
     dpg.bind_item_theme(item, tag)
-    # Track for _apply_theme reruns
-    setattr(app, f"_{item}_theme", base_tag)
+    # CQ-06: track using explicit dict instead of ad-hoc setattr
+    app._item_themes[item] = base_tag
 
 _left_panel_visible = True
 
@@ -1692,15 +1813,20 @@ def update_ui():
             _bind_status("lbl_cwl_auto_st", "theme_gray")
 
 def update_chart():
+    # PERF-01: snapshot deque references inside lock, then convert outside.
+    # list() on a 12 000-element deque takes ~1 ms; holding data_lock that long
+    # blocks the sensor thread from appending new samples.
+    plot_idx = dpg.get_value("combo_plot")
     with app.data_lock:
-        t_data = list(app.t_buf)
-        plot_idx = dpg.get_value("combo_plot")
+        t_snap = collections.deque(app.t_buf)
         if plot_idx == "Volume (L)":
-            raw_y = list(app.v_buf)
+            y_snap = collections.deque(app.v_buf)
         elif plot_idx == "Flow Rate (L/s)":
-            raw_y = list(app.f_buf)
+            y_snap = collections.deque(app.f_buf)
         else:
-            raw_y = list(app.h_buf)
+            y_snap = collections.deque(app.h_buf)
+    t_data = list(t_snap)
+    raw_y = list(y_snap)
 
     if not t_data or not raw_y:
         return
@@ -1821,7 +1947,17 @@ def frame_callback():
         if not app.chart_paused:
             update_chart()
         app._last_chart_tick = now
-    update_hover_tooltip()
+        # PERF-03: rate-limit tooltip update to chart refresh interval
+        update_hover_tooltip()
+
+# ── CQ-01: guard so that `import sensor_app` in tests does not launch the GUI ──
+# Everything from here to the end of the file is GUI construction and the main
+# loop.  All class/function definitions above this point are importable safely.
+if __name__ != "__main__":
+    raise ImportError(
+        "sensor_app.py is a standalone application and cannot be imported as a library. "
+        "To unit-test pure logic, extract it into separate modules first."
+    )
 
 # ── Build GUI ───────────────────────────────────────────────────────
 dpg.create_context()
@@ -1975,11 +2111,9 @@ def _apply_theme(mode: str):
     app.app_settings["ui_theme"] = mode
 
     # Re-bind all tracked status labels — _bind_status reads ui_theme to choose dark/lt variant
-    for item in ("lbl_airgap", "lbl_cwl_auto_st", "lbl_cwl_st"):
+    for item, base in app._item_themes.items():
         if dpg.does_item_exist(item):
-            base = getattr(app, f"_{item}_theme", None)
-            if base:
-                _bind_status(item, base)
+            _bind_status(item, base)
 
 dpg.bind_theme("theme_dark")
 
@@ -2349,6 +2483,10 @@ try:
                            default_value=f"{app.conn_params['port']}  {app.conn_params['baud']}bd")
         dpg.configure_item("lbl_conn_icon", default_value="●", color=COL_GREEN)
         dpg.bind_item_theme("btn_connect", "theme_btn_danger")
+    elif app.last_error:
+        # BUG-10: surface auto-connect failure so the user knows why they're disconnected
+        dpg.configure_item("lbl_conn", default_value=app.last_error[:48])
+        _bind_status("lbl_conn", "theme_red")
 
     while dpg.is_dearpygui_running():
         frame_callback()
@@ -2358,5 +2496,13 @@ try:
     dpg.destroy_context()
 except Exception as e:
     import traceback
+    # SEC-05: write crash traceback to a log file (visible even in a windowless .exe)
+    try:
+        crash_log = BASE_DIR / "crash.log"
+        with open(crash_log, "a", encoding="utf-8") as _cf:
+            _cf.write(f"\n--- {datetime.now().isoformat()} ---\n")
+            traceback.print_exc(file=_cf)
+    except Exception:
+        pass
     traceback.print_exc()
     input("Натиснете Enter за изход...")
