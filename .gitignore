@@ -6,3 +6,9 @@ output/*.exe
 dist/
 build/
 *.spec.bak
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
