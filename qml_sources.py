@@ -71,7 +71,7 @@ MAIN_QML = """
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
-import QtQuick.Controls.Material 2.15
+import QtQuick.Controls.Material
 
 ApplicationWindow {
     id: root
@@ -170,7 +170,7 @@ ApplicationWindow {
                 // Collapse left panel
                 RoundButton {
                     id: btnCollapse
-                    text: leftPanel.visible ? "◀" : "▶"
+                    text: leftPanel.width > 10 ? "◀" : "▶"
                     flat: true; implicitWidth: 32; implicitHeight: 32
                     contentItem: Text {
                         text: parent.text; color: "#94a3b8"; font.pixelSize: 14
@@ -178,7 +178,7 @@ ApplicationWindow {
                         verticalAlignment: Text.AlignVCenter
                     }
                     background: Rectangle { color: parent.hovered ? "#22223a" : "transparent"; radius: 6 }
-                    onClicked: leftPanel.visible = !leftPanel.visible
+                    onClicked: leftPanel.width = leftPanel.width > 10 ? 0 : 350
                 }
 
                 // Profile name
@@ -232,20 +232,20 @@ ApplicationWindow {
         }
 
         // ── Main area: left panel + chart
-        RowLayout {
+        Item {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            spacing: 6
 
             // ── Left panel (collapsible)
             ColumnLayout {
                 id: leftPanel
-                Layout.preferredWidth: 350
-                Layout.fillHeight: true
+                width: 350
+                height: parent.height
                 spacing: 6
                 clip: true
 
-                Behavior on Layout.preferredWidth { NumberAnimation { duration: 250; easing.type: Easing.OutCubic } }
+                property bool collapsed: false
+                Behavior on width { NumberAnimation { duration: 250; easing.type: Easing.OutCubic } }
 
                 // Live data card
                 LiveDataCard { id: liveCard; Layout.fillWidth: true }
@@ -262,8 +262,11 @@ ApplicationWindow {
 
             // ── Right panel: chart
             ColumnLayout {
-                Layout.fillWidth: true
-                Layout.fillHeight: true
+                anchors {
+                    left: leftPanel.right; leftMargin: 6
+                    right: parent.right
+                    top: parent.top; bottom: parent.bottom
+                }
                 spacing: 4
 
                 // Chart toolbar
@@ -830,7 +833,7 @@ Rectangle {
 SENSOR_CHART = """
 import QtQuick 2.15
 import QtQuick.Controls 2.15
-import QtCharts 2.15
+import QtCharts
 
 Item {
     id: chartRoot
