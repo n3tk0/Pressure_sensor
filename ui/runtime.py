@@ -55,18 +55,21 @@ class UiRuntime:
                 cached_status = current_status
 
             if current_status:
-                if self.app.live_pressure != cached_pressure:
-                    dpg.set_value(dashboard.ids.pressure_text, f"Pressure: {self.app.live_pressure:.3f} bar")
-                    cached_pressure = self.app.live_pressure
+                if self.app.current_pressure != cached_pressure:
+                    dpg.set_value(dashboard.ids.pressure_text, f"Pressure: {self.app.current_pressure:.3f} bar")
+                    cached_pressure = self.app.current_pressure
 
-                if self.app.live_temp != cached_temp:
-                    dpg.set_value(dashboard.ids.temp_text, f"Temp: {self.app.live_temp:.1f} °C")
-                    cached_temp = self.app.live_temp
+                if self.app.current_temperature != cached_temp:
+                    if self.app.current_temperature is None:
+                        dpg.set_value(dashboard.ids.temp_text, "Temp: -- °C")
+                    else:
+                        dpg.set_value(dashboard.ids.temp_text, f"Temp: {self.app.current_temperature:.1f} °C")
+                    cached_temp = self.app.current_temperature
 
                 if (now - last_plot_update) >= plot_update_interval:
-                    with self.app.lock:
-                        x_data = list(self.app.time_data)
-                        y_data = list(self.app.p_data)
+                    with self.app.data_lock:
+                        x_data = list(self.app.t_buf)
+                        y_data = list(self.app.p_buf)
 
                     if x_data:
                         dpg.set_value(dashboard.ids.pressure_series, [x_data, y_data])

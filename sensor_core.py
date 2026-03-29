@@ -319,9 +319,11 @@ class SensorApp:
 
         self.max_pts = 12000
         self.t_buf = collections.deque(maxlen=self.max_pts)
+        self.p_buf = collections.deque(maxlen=self.max_pts)
         self.h_buf = collections.deque(maxlen=self.max_pts)
         self.v_buf = collections.deque(maxlen=self.max_pts)
         self.f_buf = collections.deque(maxlen=self.max_pts)
+        self._start_monotonic = time.monotonic()
 
         self.start_time = time.time()
         self.current_pressure = 0.0
@@ -412,7 +414,7 @@ class SensorApp:
                                         raw_t = struct.unpack(">i", bytes.fromhex(hx[_PDIN_TEMP_OFFSET:_PDIN_TEMP_END]))[0]
                                         temp_c = raw_t * _PDIN_TEMP_SCALE
                                     with self.data_lock:
-                                        t = time.time() - self.start_time
+                                        t = time.monotonic() - self._start_monotonic
                                         f_rate = 0.0
                                         if len(self.t_buf) > 5:
                                             dt = t - self.t_buf[-5]
@@ -425,6 +427,7 @@ class SensorApp:
                                         if temp_c is not None:
                                             self.current_temperature = temp_c
                                         self.t_buf.append(t)
+                                        self.p_buf.append(p_bar)
                                         self.h_buf.append(h)
                                         self.v_buf.append(v)
                                         self.f_buf.append(f_rate)
@@ -460,16 +463,28 @@ class SensorApp:
                             logging.debug("RX buffer overflow: no sync marker found, resetting buffer")
                             rx_buf = bytearray()
                 except serial.SerialException as e:
-                    logging.error(f"Serial read error: {e}")
+                    self.last_error = f"Serial read error: {e}"
+                    logging.error(self.last_error)
+                    self.is_connected = False
                     break
                 except OSError as e:
-                    logging.error(f"Port I/O error: {e}")
+                    self.last_error = f"Port I/O error: {e}"
+                    logging.error(self.last_error)
+                    self.is_connected = False
                     break
 
             elapsed = time.time() - t0
             slp = poll_sleep - elapsed
             if slp > 0:
-                time.sleep(slp)
+                self.stop_event.wait(slp)
+        # Ensure connection state is coherent even when the thread exits unexpectedly.
+        if self.serial_conn and self.serial_conn.is_open:
+            try:
+                self.serial_conn.close()
+            except Exception:
+                pass
+        self.serial_conn = None
+        self.is_connected = False
 
     # ── Connection ──────────────────────────────────────────────────
     def connect(self):
@@ -481,8 +496,10 @@ class SensorApp:
             self.is_connected = True
             self.stop_event.clear()
             self.start_time = time.time()
+            self._start_monotonic = time.monotonic()
             with self.data_lock:
                 self.t_buf.clear()
+                self.p_buf.clear()
                 self.h_buf.clear()
                 self.v_buf.clear()
                 self.f_buf.clear()
