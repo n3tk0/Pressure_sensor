@@ -137,9 +137,29 @@ QComboBox::down-arrow { image: none; width: 0; height: 0;
 QComboBox QAbstractItemView {
     background: #131325; color: #e2e8f0;
     border: 1px solid #252545; border-radius: 8px;
-    selection-background-color: #1e1e3c;
+    selection-background-color: #252550;
+    selection-color: #e2e8f0;
     outline: none;
 }
+QComboBox QAbstractItemView::item {
+    background: #131325; color: #e2e8f0;
+    padding: 4px 10px; min-height: 24px;
+}
+QComboBox QAbstractItemView::item:selected {
+    background: #252550; color: #e2e8f0;
+}
+
+/* ── ScrollBar (dark) ── */
+QScrollBar:vertical { background: #0d0d1e; width: 8px; border-radius: 4px; }
+QScrollBar::handle:vertical { background: #2e2e50; border-radius: 4px; min-height: 20px; }
+QScrollBar::handle:vertical:hover { background: #3a3a6a; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QScrollBar:horizontal { background: #0d0d1e; height: 8px; border-radius: 4px; }
+QScrollBar::handle:horizontal { background: #2e2e50; border-radius: 4px; min-width: 20px; }
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+
+/* ── ToolTip ── */
+QToolTip { background: #1c1c30; color: #e2e8f0; border: 1px solid #2e2e50; border-radius: 6px; padding: 4px 8px; }
 
 /* ── CheckBox ── */
 QCheckBox { color: #94a3b8; spacing: 8px; }
@@ -251,7 +271,19 @@ QComboBox { background: #dde2f0; color: #1e2140; border: 1px solid #b8bee0; bord
 QComboBox:hover { border-color: #9098cc; }
 QComboBox::drop-down { border: none; width: 20px; }
 QComboBox::down-arrow { image: none; border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 5px solid #4a3fbf; margin-right: 8px; }
-QComboBox QAbstractItemView { background: #eef0f8; color: #1e2140; border: 1px solid #c4cadc; border-radius: 8px; selection-background-color: #d0d6ec; outline: none; }
+QComboBox QAbstractItemView { background: #eef0f8; color: #1e2140; border: 1px solid #c4cadc; border-radius: 8px; selection-background-color: #d0d6ec; selection-color: #1e2140; outline: none; }
+QComboBox QAbstractItemView::item { background: #eef0f8; color: #1e2140; padding: 4px 10px; min-height: 24px; }
+QComboBox QAbstractItemView::item:selected { background: #d0d6ec; color: #1e2140; }
+
+QScrollBar:vertical { background: #dde2f0; width: 8px; border-radius: 4px; }
+QScrollBar::handle:vertical { background: #9098cc; border-radius: 4px; min-height: 20px; }
+QScrollBar::handle:vertical:hover { background: #7080b8; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QScrollBar:horizontal { background: #dde2f0; height: 8px; border-radius: 4px; }
+QScrollBar::handle:horizontal { background: #9098cc; border-radius: 4px; min-width: 20px; }
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+
+QToolTip { background: #eef0f8; color: #1e2140; border: 1px solid #b8bee0; border-radius: 6px; padding: 4px 8px; }
 
 QCheckBox { color: #5a6080; spacing: 8px; }
 QCheckBox::indicator { width: 16px; height: 16px; border: 1px solid #9098cc; border-radius: 4px; background: #eef0f8; }
@@ -1263,6 +1295,9 @@ def main():
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
 
     qapp = QApplication(sys.argv)
+    # Fusion style fully respects QSS — prevents Windows 11 native Fluent style
+    # from overriding ComboBox/input field backgrounds with white/system colours.
+    qapp.setStyle("Fusion")
     qapp.setApplicationName("EN 14055 Cistern Analytics")
 
     win = SensorMainWindow()
