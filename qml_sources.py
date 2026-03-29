@@ -79,7 +79,30 @@ ApplicationWindow {
     width: 1320
     height: 880
     title: "EN 14055 Cistern Analytics — ifm PI1789"
-    color: "#0a0a14"
+    color: bgDeep
+
+    // ── Theme properties (all UI colors derived from isDark) ──────────
+    property bool isDark: true
+
+    readonly property color bgDeep:    isDark ? "#0a0a14" : "#dde1f0"
+    readonly property color bgPanel:   isDark ? "#0f0f1e" : "#e4e8f5"
+    readonly property color bgMid:     isDark ? "#161628" : "#eaeef8"
+    readonly property color bgCard:    isDark ? "#1c1c30" : "#f2f4fb"
+    readonly property color bgInput:   isDark ? "#22223a" : "#ffffff"
+    readonly property color borderCol: isDark ? "#2e2e50" : "#c2c8dc"
+    readonly property color textPri:   isDark ? "#e2e8f0" : "#1e2140"
+    readonly property color textSec:   isDark ? "#94a3b8" : "#4a5468"
+    readonly property color textMute:  isDark ? "#4a5568" : "#8892b0"
+    readonly property color accentCol: isDark ? "#7c6ef4" : "#5b50d6"
+    readonly property color accentDim: isDark ? "#4a3fa8" : "#3d35b8"
+    readonly property color btnDef:    isDark ? "#22234a" : "#c8ccec"
+    readonly property color chartBg:   isDark ? "#111122" : "#eaeef8"
+    readonly property color chartPlot: isDark ? "#0d0d1f" : "#dde1f0"
+    readonly property color chartGrid: isDark ? "#1e1e38" : "#c2c8dc"
+    readonly property color chartAxis: isDark ? "#2e2e50" : "#a0a8c8"
+    readonly property color chartLbl:  isDark ? "#4a5568" : "#3a4060"
+
+    Component.onCompleted: { isDark = (bridge.currentTheme !== "Light") }
 
     // ── Fonts
     FontLoader { id: fontMono;  source: "qrc:/fonts/JetBrainsMono.ttf";  onStatusChanged: if(status===FontLoader.Error) console.log("mono font not found, using fallback") }
@@ -101,26 +124,30 @@ ApplicationWindow {
         function onLimitsChanged()      { limitsCard.refresh()            }
         function onFlushChanged()       { flushCard.refreshState()        }
         function onFlushRowsChanged(rows) { flushCard.refreshRows(rows)   }
+        function onThemeChanged(theme)  { root.isDark = (theme !== "Light") }
     }
 
     // Helper exposed to QML components
     function colorForClass(cls) {
-        var map = { "green":"#4ade80","red":"#f87171","orange":"#fb923c",
-                    "blue":"#7c6ef4","cyan":"#22d3ee","muted":"#4a5568" }
-        return map[cls] || "#4a5568"
+        if (cls === "green")  return "#4ade80"
+        if (cls === "red")    return "#f87171"
+        if (cls === "orange") return "#fb923c"
+        if (cls === "blue")   return root.accentCol
+        if (cls === "cyan")   return "#22d3ee"
+        return root.textMute
     }
 
     // ── Menu bar
     menuBar: MenuBar {
-        background: Rectangle { color: "#0f0f1e"; border.color: "#2e2e50"; border.width: 0 }
+        background: Rectangle { color: root.bgPanel; border.color: root.borderCol; border.width: 0 }
         delegate: MenuBarItem {
             contentItem: Text {
-                text: parent.text; color: "#94a3b8"; font.pixelSize: 13
+                text: parent.text; color: root.textSec; font.pixelSize: 13
                 font.family: fontSans.name
                 leftPadding: 12; rightPadding: 12
             }
             background: Rectangle {
-                color: parent.highlighted ? "#22223a" : "transparent"
+                color: parent.highlighted ? root.bgInput : "transparent"
                 radius: 4
             }
         }
@@ -159,9 +186,9 @@ ApplicationWindow {
         Rectangle {
             Layout.fillWidth: true
             height: 44
-            color: "#161628"
+            color: root.bgMid
             radius: 10
-            border.color: "#2e2e50"; border.width: 1
+            border.color: root.borderCol; border.width: 1
 
             RowLayout {
                 anchors { fill: parent; leftMargin: 12; rightMargin: 12 }
@@ -173,18 +200,18 @@ ApplicationWindow {
                     text: leftPanel.width > 10 ? "◀" : "▶"
                     flat: true; implicitWidth: 32; implicitHeight: 32
                     contentItem: Text {
-                        text: parent.text; color: "#94a3b8"; font.pixelSize: 14
+                        text: parent.text; color: root.textSec; font.pixelSize: 14
                         horizontalAlignment: Text.AlignHCenter
                         verticalAlignment: Text.AlignVCenter
                     }
-                    background: Rectangle { color: parent.hovered ? "#22223a" : "transparent"; radius: 6 }
+                    background: Rectangle { color: parent.hovered ? root.bgInput : "transparent"; radius: 6 }
                     onClicked: leftPanel.width = leftPanel.width > 10 ? 0 : 350
                 }
 
                 // Profile name
                 Text {
                     text: "Profile: " + bridge.profileName
-                    color: "#94a3b8"; font.pixelSize: 13; font.family: fontSans.name
+                    color: root.textSec; font.pixelSize: 13; font.family: fontSans.name
                     Layout.fillWidth: true
                     elide: Text.ElideRight
                 }
@@ -195,14 +222,14 @@ ApplicationWindow {
                     Rectangle {
                         id: connDot
                         width: 9; height: 9; radius: 5
-                        color: "#4a5568"
+                        color: root.textMute
                         anchors.verticalCenter: parent.verticalCenter
                         Behavior on color { ColorAnimation { duration: 400 } }
                     }
                     Text {
                         id: connLabel
                         text: "Disconnected"
-                        color: "#94a3b8"; font.pixelSize: 13
+                        color: root.textSec; font.pixelSize: 13
                         anchors.verticalCenter: parent.verticalCenter
                     }
                 }
@@ -213,7 +240,7 @@ ApplicationWindow {
                     text: "Connect Sensor"
                     property bool connected: false
                     contentItem: Text {
-                        text: parent.text; color: "#e2e8f0"
+                        text: parent.text; color: root.textPri
                         font.pixelSize: 13; font.family: fontSans.name
                         horizontalAlignment: Text.AlignHCenter
                         verticalAlignment: Text.AlignVCenter
@@ -273,46 +300,46 @@ ApplicationWindow {
                 Rectangle {
                     Layout.fillWidth: true
                     height: 42
-                    color: "#161628"; radius: 10
-                    border.color: "#2e2e50"; border.width: 1
+                    color: root.bgMid; radius: 10
+                    border.color: root.borderCol; border.width: 1
 
                     RowLayout {
                         anchors { fill: parent; leftMargin: 10; rightMargin: 10 }
                         spacing: 8
 
-                        Text { text: "Axis:"; color: "#94a3b8"; font.pixelSize: 12 }
+                        Text { text: "Axis:"; color: root.textSec; font.pixelSize: 12 }
                         ComboBox {
                             id: comboAxis
                             model: ["Height (mm)", "Volume (L)", "Flow Rate (L/s)"]
                             implicitWidth: 140; implicitHeight: 30
                             onCurrentTextChanged: bridge.setPlotMode(currentText)
                             contentItem: Text {
-                                text: parent.displayText; color: "#e2e8f0"
+                                text: parent.displayText; color: root.textPri
                                 font.pixelSize: 12; leftPadding: 8
                                 verticalAlignment: Text.AlignVCenter
                             }
-                            background: Rectangle { color: "#22223a"; radius: 6; border.color: "#2e2e50"; border.width: 1 }
+                            background: Rectangle { color: root.bgInput; radius: 6; border.color: root.borderCol; border.width: 1 }
                         }
 
-                        Text { text: "Window:"; color: "#94a3b8"; font.pixelSize: 12 }
+                        Text { text: "Window:"; color: root.textSec; font.pixelSize: 12 }
                         ComboBox {
                             id: comboWindow
                             model: ["10 s","30 s","60 s","5 min","All"]
                             currentIndex: 1
                             implicitWidth: 76; implicitHeight: 30
                             onCurrentTextChanged: sensorChart.setWindow(currentText)
-                            contentItem: Text { text: parent.displayText; color: "#e2e8f0"; font.pixelSize: 12; leftPadding: 8; verticalAlignment: Text.AlignVCenter }
-                            background: Rectangle { color: "#22223a"; radius: 6; border.color: "#2e2e50"; border.width: 1 }
+                            contentItem: Text { text: parent.displayText; color: root.textPri; font.pixelSize: 12; leftPadding: 8; verticalAlignment: Text.AlignVCenter }
+                            background: Rectangle { color: root.bgInput; radius: 6; border.color: root.borderCol; border.width: 1 }
                         }
 
-                        Text { text: "Smooth:"; color: "#94a3b8"; font.pixelSize: 12 }
+                        Text { text: "Smooth:"; color: root.textSec; font.pixelSize: 12 }
                         ComboBox {
                             id: comboSmooth
                             model: ["None","SMA-5","SMA-20","EMA-Fast","EMA-Slow"]
                             implicitWidth: 106; implicitHeight: 30
                             onCurrentTextChanged: bridge.setSmoothAlg(currentText)
-                            contentItem: Text { text: parent.displayText; color: "#e2e8f0"; font.pixelSize: 12; leftPadding: 8; verticalAlignment: Text.AlignVCenter }
-                            background: Rectangle { color: "#22223a"; radius: 6; border.color: "#2e2e50"; border.width: 1 }
+                            contentItem: Text { text: parent.displayText; color: root.textPri; font.pixelSize: 12; leftPadding: 8; verticalAlignment: Text.AlignVCenter }
+                            background: Rectangle { color: root.bgInput; radius: 6; border.color: root.borderCol; border.width: 1 }
                         }
 
                         CheckBox {
@@ -320,7 +347,7 @@ ApplicationWindow {
                             text: "Auto-scroll"
                             checked: true
                             onCheckedChanged: sensorChart.autoScroll = checked
-                            contentItem: Text { text: parent.text; color: "#94a3b8"; font.pixelSize: 12; leftPadding: parent.indicator.width + 4; verticalAlignment: Text.AlignVCenter }
+                            contentItem: Text { text: parent.text; color: root.textSec; font.pixelSize: 12; leftPadding: parent.indicator.width + 4; verticalAlignment: Text.AlignVCenter }
                         }
 
                         Button {
@@ -328,12 +355,12 @@ ApplicationWindow {
                             property bool paused: false
                             text: paused ? "Resume" : "Pause"
                             implicitWidth: 80; implicitHeight: 30
-                            contentItem: Text { text: parent.text; color: "#e2e8f0"; font.pixelSize: 12; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                            contentItem: Text { text: parent.text; color: root.textPri; font.pixelSize: 12; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
                             background: Rectangle {
                                 radius: 6
                                 color: btnPause.paused
                                     ? (btnPause.hovered ? "#256638" : "#1d5230")
-                                    : (btnPause.hovered ? "#2e2f5c" : "#22234a")
+                                    : (btnPause.hovered ? "#2e2f5c" : root.btnDef)
                             }
                             onClicked: {
                                 paused = !paused
@@ -344,8 +371,8 @@ ApplicationWindow {
                         Button {
                             text: "Screenshot"
                             implicitWidth: 100; implicitHeight: 30
-                            contentItem: Text { text: parent.text; color: "#e2e8f0"; font.pixelSize: 12; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
-                            background: Rectangle { color: parent.hovered ? "#2e2f5c" : "#22234a"; radius: 6 }
+                            contentItem: Text { text: parent.text; color: root.textPri; font.pixelSize: 12; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                            background: Rectangle { color: parent.hovered ? "#2e2f5c" : root.btnDef; radius: 6 }
                             onClicked: bridge.exportScreenshot()
                         }
 
@@ -354,12 +381,12 @@ ApplicationWindow {
                         Text {
                             id: deltaLabel
                             text: "---"
-                            color: "#7c6ef4"; font.pixelSize: 13; font.family: fontSans.name
+                            color: root.accentCol; font.pixelSize: 13; font.family: fontSans.name
                         }
                         Button {
                             text: "Clear"
                             implicitWidth: 52; implicitHeight: 30
-                            contentItem: Text { text: parent.text; color: "#e2e8f0"; font.pixelSize: 11; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                            contentItem: Text { text: parent.text; color: root.textPri; font.pixelSize: 11; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
                             background: Rectangle { color: parent.hovered ? "#3a1f1f" : "#2c1818"; radius: 6 }
                             onClicked: deltaLabel.text = "---"
                         }
@@ -383,13 +410,13 @@ ApplicationWindow {
         anchors { bottom: parent.bottom; horizontalCenter: parent.horizontalCenter; bottomMargin: 24 }
         width: toastText.implicitWidth + 40; height: 40
         radius: 20
-        color: "#22223a"; border.color: "#7c6ef4"; border.width: 1
+        color: root.bgInput; border.color: root.accentCol; border.width: 1
         opacity: 0
         z: 100
 
         Text {
             id: toastText; anchors.centerIn: parent
-            color: "#e2e8f0"; font.pixelSize: 13
+            color: root.textPri; font.pixelSize: 13
         }
 
         SequentialAnimation {
@@ -436,8 +463,8 @@ import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 
 Rectangle {
-    color: "#1c1c30"; radius: 12
-    border.color: "#2e2e50"; border.width: 1
+    color: root.bgCard; radius: 12
+    border.color: root.borderCol; border.width: 1
     implicitHeight: cardContent.implicitHeight + 24
 
     ColumnLayout {
@@ -447,9 +474,9 @@ Rectangle {
 
         // Header
         RowLayout {
-            Text { text: "LIVE DATA"; color: "#7c6ef4"; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 1.5 }
+            Text { text: "LIVE DATA"; color: root.accentCol; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 1.5 }
             Item { Layout.fillWidth: true }
-            Rectangle { width: 8; height: 8; radius: 4; color: bridge.isConnected ? "#4ade80" : "#4a5568"
+            Rectangle { width: 8; height: 8; radius: 4; color: bridge.isConnected ? "#4ade80" : root.textMute
                 Behavior on color { ColorAnimation { duration: 400 } }
             }
         }
@@ -463,11 +490,11 @@ Rectangle {
                 spacing: 2
                 Text {
                     text: bridge.height.toFixed(1) + " mm"
-                    color: "#7c6ef4"; font.pixelSize: 30; font.weight: Font.Bold
+                    color: root.accentCol; font.pixelSize: 30; font.weight: Font.Bold
                     font.family: "monospace"
                     Behavior on text { }
                 }
-                Text { text: "HEIGHT"; color: "#4a5568"; font.pixelSize: 10; font.letterSpacing: 1.2 }
+                Text { text: "HEIGHT"; color: root.textMute; font.pixelSize: 10; font.letterSpacing: 1.2 }
             }
 
             Item { Layout.fillWidth: true }
@@ -481,36 +508,36 @@ Rectangle {
                     color: "#4ade80"; font.pixelSize: 20; font.weight: Font.Medium
                     font.family: "monospace"
                 }
-                Text { Layout.alignment: Qt.AlignRight; text: "VOLUME"; color: "#4a5568"; font.pixelSize: 10; font.letterSpacing: 1.2 }
+                Text { Layout.alignment: Qt.AlignRight; text: "VOLUME"; color: root.textMute; font.pixelSize: 10; font.letterSpacing: 1.2 }
             }
         }
 
         // Divider
-        Rectangle { Layout.fillWidth: true; height: 1; color: "#2e2e50" }
+        Rectangle { Layout.fillWidth: true; height: 1; color: root.borderCol }
 
         // Secondary row: pressure / flow / temperature
         GridLayout {
             Layout.fillWidth: true
             columns: 3; rowSpacing: 4; columnSpacing: 8
 
-            Text { text: "Pressure"; color: "#4a5568"; font.pixelSize: 11 }
-            Text { text: "Flow";     color: "#4a5568"; font.pixelSize: 11 }
-            Text { text: "Temp";     color: "#4a5568"; font.pixelSize: 11 }
+            Text { text: "Pressure"; color: root.textMute; font.pixelSize: 11 }
+            Text { text: "Flow";     color: root.textMute; font.pixelSize: 11 }
+            Text { text: "Temp";     color: root.textMute; font.pixelSize: 11 }
 
-            Text { text: bridge.pressureStr;    color: "#94a3b8"; font.pixelSize: 13; font.family: "monospace" }
+            Text { text: bridge.pressureStr;    color: root.textSec; font.pixelSize: 13; font.family: "monospace" }
             Text {
                 text: bridge.flow.toFixed(3) + " L/s"
                 color: "#fb923c"; font.pixelSize: 13; font.family: "monospace"
             }
-            Text { text: bridge.temperatureStr; color: "#94a3b8"; font.pixelSize: 13; font.family: "monospace" }
+            Text { text: bridge.temperatureStr; color: root.textSec; font.pixelSize: 13; font.family: "monospace" }
         }
 
         // Live headroom bar
         RowLayout {
             Layout.fillWidth: true; spacing: 8
-            Text { text: "Headroom"; color: "#4a5568"; font.pixelSize: 11 }
+            Text { text: "Headroom"; color: root.textMute; font.pixelSize: 11 }
             Rectangle {
-                Layout.fillWidth: true; height: 6; radius: 3; color: "#22223a"
+                Layout.fillWidth: true; height: 6; radius: 3; color: root.bgInput
                 Rectangle {
                     id: headroomFill
                     width: parent.width * Math.min(1, Math.max(0,
@@ -540,8 +567,8 @@ import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 
 Rectangle {
-    color: "#1c1c30"; radius: 12
-    border.color: "#2e2e50"; border.width: 1
+    color: root.bgCard; radius: 12
+    border.color: root.borderCol; border.width: 1
     implicitHeight: limitsContent.implicitHeight + 24
 
     function refresh() { limitsContent.forceLayout() }
@@ -552,7 +579,7 @@ Rectangle {
         spacing: 8
 
         // Header
-        Text { text: "EN 14055 LIMITS"; color: "#7c6ef4"; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 1.5 }
+        Text { text: "EN 14055 LIMITS"; color: root.accentCol; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 1.5 }
 
         // Action buttons — 2 columns
         GridLayout {
@@ -585,7 +612,7 @@ Rectangle {
             }
         }
 
-        Rectangle { Layout.fillWidth: true; height: 1; color: "#2e2e50" }
+        Rectangle { Layout.fillWidth: true; height: 1; color: root.borderCol }
 
         // Limits grid
         GridLayout {
@@ -613,7 +640,7 @@ Rectangle {
             LimitValue  { text: "" }
         }
 
-        Rectangle { Layout.fillWidth: true; height: 1; color: "#2e2e50" }
+        Rectangle { Layout.fillWidth: true; height: 1; color: root.borderCol }
 
         // Status labels (driven by bridge signals via main window)
         Text {
@@ -648,10 +675,10 @@ import QtQuick 2.15
 import QtQuick.Controls 2.15
 
 Button {
-    property color color: "#22234a"
+    property color color: root.btnDef
     implicitHeight: 32; implicitWidth: 100
     contentItem: Text {
-        text: parent.text; color: "#e2e8f0"; font.pixelSize: 12
+        text: parent.text; color: root.textPri; font.pixelSize: 12
         horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
     }
     background: Rectangle {
@@ -665,7 +692,7 @@ Button {
 
 LIMIT_LABEL = """
 import QtQuick 2.15
-Text { color: "#4a5568"; font.pixelSize: 11 }
+Text { color: root.textMute; font.pixelSize: 11 }
 """
 
 LIMIT_VALUE = """
@@ -673,7 +700,7 @@ import QtQuick 2.15
 Text {
     property alias color: self.color
     id: self
-    color: "#94a3b8"; font.pixelSize: 12; font.family: "monospace"
+    color: root.textSec; font.pixelSize: 12; font.family: "monospace"
     elide: Text.ElideRight
 }
 """
@@ -685,8 +712,8 @@ import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 
 Rectangle {
-    color: "#1c1c30"; radius: 12
-    border.color: "#2e2e50"; border.width: 1
+    color: root.bgCard; radius: 12
+    border.color: root.borderCol; border.width: 1
     implicitHeight: logContent.implicitHeight + 24
 
     ColumnLayout {
@@ -694,13 +721,13 @@ Rectangle {
         anchors { fill: parent; margins: 14 }
         spacing: 8
 
-        Text { text: "DATA LOG"; color: "#7c6ef4"; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 1.5 }
+        Text { text: "DATA LOG"; color: root.accentCol; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 1.5 }
 
         Button {
             Layout.fillWidth: true; implicitHeight: 34
             text: bridge.isLogging ? "Stop Data Log" : "Start Data Log (CSV)"
             contentItem: Text {
-                text: parent.text; color: "#e2e8f0"; font.pixelSize: 13
+                text: parent.text; color: root.textPri; font.pixelSize: 13
                 horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
             }
             background: Rectangle {
@@ -723,8 +750,8 @@ import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 
 Rectangle {
-    color: "#1c1c30"; radius: 12
-    border.color: "#2e2e50"; border.width: 1
+    color: root.bgCard; radius: 12
+    border.color: root.borderCol; border.width: 1
     implicitHeight: flushContent.implicitHeight + 24
 
     property var flushRows: []
@@ -738,18 +765,18 @@ Rectangle {
         spacing: 8
 
         RowLayout {
-            Text { text: "FLUSH TEST  (EN 14055)"; color: "#7c6ef4"; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 1.5 }
+            Text { text: "FLUSH TEST  (EN 14055)"; color: root.accentCol; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 1.5 }
         }
 
         RowLayout {
             Layout.fillWidth: true; spacing: 8
-            Text { text: "Type:"; color: "#4a5568"; font.pixelSize: 12 }
+            Text { text: "Type:"; color: root.textMute; font.pixelSize: 12 }
             ComboBox {
                 id: flushTypeCombo
                 model: ["Full Flush", "Part Flush"]
                 Layout.fillWidth: true; implicitHeight: 30
-                contentItem: Text { text: parent.displayText; color: "#e2e8f0"; font.pixelSize: 12; leftPadding: 8; verticalAlignment: Text.AlignVCenter }
-                background: Rectangle { color: "#22223a"; radius: 6; border.color: "#2e2e50"; border.width: 1 }
+                contentItem: Text { text: parent.displayText; color: root.textPri; font.pixelSize: 12; leftPadding: 8; verticalAlignment: Text.AlignVCenter }
+                background: Rectangle { color: root.bgInput; radius: 6; border.color: root.borderCol; border.width: 1 }
             }
         }
 
@@ -757,7 +784,7 @@ Rectangle {
             Layout.fillWidth: true; implicitHeight: 34
             text: bridge.isFlushMeasuring ? "Stop Flush Measurement" : "Start Flush Measurement"
             contentItem: Text {
-                text: parent.text; color: "#e2e8f0"; font.pixelSize: 13
+                text: parent.text; color: root.textPri; font.pixelSize: 13
                 horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
             }
             background: Rectangle {
@@ -775,14 +802,14 @@ Rectangle {
 
         Text {
             text: "* EN col = rate ignoring first 1L and last 2L"
-            color: "#4a5568"; font.pixelSize: 11; wrapMode: Text.WordWrap
+            color: root.textMute; font.pixelSize: 11; wrapMode: Text.WordWrap
             Layout.fillWidth: true
         }
 
         // Flush results list
         Rectangle {
             Layout.fillWidth: true; height: 130
-            color: "#161628"; radius: 8; border.color: "#2e2e50"; border.width: 1
+            color: root.bgMid; radius: 8; border.color: root.borderCol; border.width: 1
             clip: true
 
             ListView {
@@ -794,7 +821,7 @@ Rectangle {
 
                 delegate: Text {
                     text: modelData
-                    color: "#94a3b8"; font.pixelSize: 11; font.family: "monospace"
+                    color: root.textSec; font.pixelSize: 11; font.family: "monospace"
                     width: flushList.width; wrapMode: Text.NoWrap
                     elide: Text.ElideRight
                 }
@@ -802,7 +829,7 @@ Rectangle {
                 Text {
                     anchors.centerIn: parent
                     text: "No measurements yet."
-                    color: "#4a5568"; font.pixelSize: 12
+                    color: root.textMute; font.pixelSize: 12
                     visible: flushList.count === 0
                 }
             }
@@ -813,15 +840,15 @@ Rectangle {
             Layout.fillWidth: true; spacing: 6
             Button {
                 text: "Clear All"; implicitHeight: 30; implicitWidth: 90
-                contentItem: Text { text: parent.text; color: "#e2e8f0"; font.pixelSize: 12; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                contentItem: Text { text: parent.text; color: root.textPri; font.pixelSize: 12; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
                 background: Rectangle { color: parent.hovered ? "#8c3a3a" : "#6d2b2b"; radius: 7 }
                 onClicked: bridge.clearFlush()
             }
             Button {
                 Layout.fillWidth: true; implicitHeight: 30
                 text: "Compliance Check"
-                contentItem: Text { text: parent.text; color: "#e2e8f0"; font.pixelSize: 12; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
-                background: Rectangle { color: parent.hovered ? "#2e2f5c" : "#22234a"; radius: 7 }
+                contentItem: Text { text: parent.text; color: root.textPri; font.pixelSize: 12; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                background: Rectangle { color: parent.hovered ? "#2e2f5c" : root.btnDef; radius: 7 }
                 onClicked: bridge.checkCompliance()
             }
         }
@@ -894,31 +921,31 @@ Item {
         antialiasing: true
         legend.visible: true
         legend.alignment: Qt.AlignTop
-        backgroundColor: "#111122"
-        plotAreaColor: "#0d0d1f"
+        backgroundColor: root.chartBg
+        plotAreaColor: root.chartPlot
 
         // Style axes
         ValueAxis {
             id: xAxis
             min: 0; max: 60
             gridVisible: true
-            gridLineColor: "#1e1e38"
-            labelsColor: "#4a5568"
+            gridLineColor: root.chartGrid
+            labelsColor: root.chartLbl
             labelsFont.pixelSize: 11
             titleText: "Time (s)"
             titleFont.pixelSize: 11
-            color: "#2e2e50"
+            color: root.chartAxis
         }
         ValueAxis {
             id: yAxis
             min: 0; max: 1000
             gridVisible: true
-            gridLineColor: "#1e1e38"
-            labelsColor: "#4a5568"
+            gridLineColor: root.chartGrid
+            labelsColor: root.chartLbl
             labelsFont.pixelSize: 11
             titleText: "Height (mm)"
             titleFont.pixelSize: 11
-            color: "#2e2e50"
+            color: root.chartAxis
         }
 
         // Main sensor series
@@ -926,7 +953,7 @@ Item {
             id: mainSeries
             name: "Sensor"
             axisX: xAxis; axisY: yAxis
-            color: "#7c6ef4"; width: 2
+            color: root.accentCol; width: 2
             pointsVisible: false
         }
 
@@ -993,7 +1020,7 @@ Item {
             id: crosshairVLine
             x: chart.plotArea.x + (crosshairX.value - xAxis.min) / (xAxis.max - xAxis.min) * chart.plotArea.width
             y: chart.plotArea.y; width: 1; height: chart.plotArea.height
-            color: "#94a3b8"; opacity: 0.4
+            color: root.textSec; opacity: 0.4
             property real value: 0; onValueChanged: x = chart.plotArea.x + (value - xAxis.min) / Math.max(1, xAxis.max - xAxis.min) * chart.plotArea.width
         }
 
@@ -1002,12 +1029,12 @@ Item {
             x: Math.min(crosshairVLine.x + 8, chartRoot.width - width - 4)
             y: chart.plotArea.y + 8
             width: hoverLabel.implicitWidth + 16; height: 26; radius: 8
-            color: "#22223a"; border.color: "#7c6ef4"; border.width: 1
+            color: root.bgInput; border.color: root.accentCol; border.width: 1
 
             Text {
                 id: hoverLabel
                 anchors.centerIn: parent
-                color: "#e2e8f0"; font.pixelSize: 11; font.family: "monospace"
+                color: root.textPri; font.pixelSize: 11; font.family: "monospace"
             }
         }
     }

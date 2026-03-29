@@ -63,6 +63,8 @@ class SensorBridge(QObject):
     cwlAutoStateChanged = Signal(str, str)  # text, css-class
     # Flush table rows as list of formatted strings
     flushRowsChanged  = Signal("QVariantList")
+    # Theme change: emitted immediately when user switches theme
+    themeChanged      = Signal(str)          # new theme name ("Dark" | "Light")
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -194,6 +196,10 @@ class SensorBridge(QObject):
     @Property(str, notify=limitsChanged)
     def avgWindowLabel(self) -> str:
         return str(self._app.app_settings.get("avg_window", 0.5))
+
+    @Property(str, notify=themeChanged)
+    def currentTheme(self) -> str:
+        return self._app.app_settings.get("ui_theme", "Dark")
 
     # ── Q_PROPERTY: connection / app state ────────────────────────────
 
@@ -467,7 +473,7 @@ class SensorBridge(QObject):
             self.limitsChanged.emit()
             new_theme = self._app.app_settings.get("ui_theme", "Dark")
             if new_theme != old_theme:
-                self.toastMessage.emit(f"Theme changed to {new_theme} — restart to apply")
+                self.themeChanged.emit(new_theme)
 
     @Slot()
     def openColorsDlg(self):

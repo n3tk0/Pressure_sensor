@@ -4,31 +4,26 @@ sensor_app_qml.py — EN 14055 Cistern Analytics — PySide6 / QML edition.
 Loads all QML from Python string constants (qml_sources.py) so the entire
 app is a single PyInstaller --onefile exe with no external assets required.
 
+QML component files are written to a per-run temp directory so the QML engine
+can resolve type names (e.g. LiveDataCard) by filename — the standard Qt Quick
+mechanism for component discovery.
+
 Entry point:  python sensor_app_qml.py
 Build:        pyinstaller sensor_app_qml.spec
 """
 from __future__ import annotations
 
+import os
+import shutil
 import sys
+import tempfile
 
 from PySide6.QtCore import QUrl, Qt
-from PySide6.QtGui import QGuiApplication, QFont
-from PySide6.QtQml import QQmlApplicationEngine, qmlRegisterType
+from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtWidgets import QApplication
 
 from sensor_bridge import SensorBridge
 import qml_sources as Q
-
-
-def _load_component(engine: QQmlApplicationEngine, name: str, qml_src: str):
-    """Register a QML string as a named component in the 'App' module (1.0)."""
-    comp = engine.createComponent()  # type: ignore[attr-defined]
-    # Use QQmlComponent via setData approach
-    from PySide6.QtQml import QQmlComponent
-    from PySide6.QtCore import QByteArray
-    comp = QQmlComponent(engine)
-    comp.setData(QByteArray(qml_src.encode()), QUrl(f"qml/{name}.qml"))
-    return comp
 
 
 def main():
@@ -45,62 +40,47 @@ def main():
     bridge = SensorBridge()
 
     engine = QQmlApplicationEngine()
-
-    # Expose bridge to QML root context
     engine.rootContext().setContextProperty("bridge", bridge)
 
-    # Register all QML components as in-memory URLs.
-    # Each component is set as data on a named URL so QML import resolution works.
+    # Write all QML components to a temp directory.
+    # Qt Quick automatically makes every *.qml file in the same directory
+    # available as a named component type — no explicit registration needed.
+    tmpdir = tempfile.mkdtemp(prefix="cistern_qml_")
+
     components = {
-        "LiveDataCard":  Q.LIVE_DATA_CARD,
-        "LimitsCard":    Q.LIMITS_CARD,
-        "FlushCard":     Q.FLUSH_CARD,
-        "LogCard":       Q.LOG_CARD,
-        "SensorChart":   Q.SENSOR_CHART,
-        "ActionButton":  Q.ACTION_BUTTON,
-        "LimitLabel":    Q.LIMIT_LABEL,
-        "LimitValue":    Q.LIMIT_VALUE,
+        "LiveDataCard": Q.LIVE_DATA_CARD,
+        "LimitsCard":   Q.LIMITS_CARD,
+        "FlushCard":    Q.FLUSH_CARD,
+        "LogCard":      Q.LOG_CARD,
+        "SensorChart":  Q.SENSOR_CHART,
+        "ActionButton": Q.ACTION_BUTTON,
+        "LimitLabel":   Q.LIMIT_LABEL,
+        "LimitValue":   Q.LIMIT_VALUE,
     }
 
-    from PySide6.QtQml import QQmlComponent
-    from PySide6.QtCore import QByteArray
-
-    # Pre-load all components into the engine's URL cache
-    _comps = {}
     for name, src in components.items():
-        url = QUrl(f"memory:/{name}.qml")
-        comp = QQmlComponent(engine)
-        comp.setData(QByteArray(src.encode()), url)
-        _comps[name] = comp  # keep reference
+        with open(os.path.join(tmpdir, f"{name}.qml"), "w", encoding="utf-8") as f:
+            f.write(src)
 
-    # Register each component URL in the QML import path via a virtual file map
-    # by adding them as named import URLs in the import path
-    for name in components:
-        engine.addImportPath(f"memory:/")
+    main_path = os.path.join(tmpdir, "Main.qml")
+    with open(main_path, "w", encoding="utf-8") as f:
+        f.write(Q.MAIN_QML)
 
-    # Load main window from string
-    main_url = QUrl("memory:/Main.qml")
-    from PySide6.QtCore import QByteArray
-    main_comp = QQmlComponent(engine)
-    main_comp.setData(QByteArray(Q.MAIN_QML.encode()), main_url)
+    engine.load(QUrl.fromLocalFile(main_path))
 
-    if main_comp.status() == QQmlComponent.Error:
-        for err in main_comp.errors():
-            print(f"QML Error: {err.toString()}")
+    if not engine.rootObjects():
+        print("Failed to load QML root object — check console for errors.")
         sys.exit(1)
-
-    obj = main_comp.create()
-    if obj is None:
-        print("Failed to create QML root object")
-        for err in main_comp.errors():
-            print(f"  {err.toString()}")
-        sys.exit(1)
-
-    # Keep python object alive
-    _root = obj
 
     ret = app.exec()
     bridge.cleanup()
+
+    # Remove temp QML files
+    try:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    except OSError:
+        pass
+
     sys.exit(ret)
 
 
