@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import dearpygui.dearpygui as dpg
@@ -8,10 +9,10 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 FONTS_DIR = ROOT_DIR / "fonts"
 
 
+@dataclass
 class UiFonts:
-    def __init__(self, default_font: int, heading_font: int):
-        self.default = default_font
-        self.heading = heading_font
+    default: int
+    heading: int
 
 
 def _font_path(filename: str) -> str:
@@ -26,7 +27,7 @@ def setup_fonts() -> UiFonts:
         default_font = dpg.add_font(_font_path("SamsungSans-Regular.ttf"), 18)
         heading_font = dpg.add_font(_font_path("Samsung Sans Bold.ttf"), 22)
     dpg.bind_font(default_font)
-    return UiFonts(default_font=default_font, heading_font=heading_font)
+    return UiFonts(default=default_font, heading=heading_font)
 
 
 def create_tailwind_theme() -> int:
