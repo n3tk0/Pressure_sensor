@@ -92,10 +92,10 @@ ApplicationWindow {
     readonly property color borderCol: isDark ? "#2e2e50" : "#c2c8dc"
     readonly property color textPri:   isDark ? "#e2e8f0" : "#1e2140"
     readonly property color textSec:   isDark ? "#94a3b8" : "#4a5468"
-    readonly property color textMute:  isDark ? "#4a5568" : "#8892b0"
+    readonly property color textMute:  isDark ? "#4a5568" : "#606880"
     readonly property color accentCol: isDark ? "#7c6ef4" : "#5b50d6"
     readonly property color accentDim: isDark ? "#4a3fa8" : "#3d35b8"
-    readonly property color btnDef:    isDark ? "#22234a" : "#c8ccec"
+    readonly property color btnDef:    isDark ? "#22234a" : "#b8bde8"
     readonly property color chartBg:   isDark ? "#111122" : "#eaeef8"
     readonly property color chartPlot: isDark ? "#0d0d1f" : "#dde1f0"
     readonly property color chartGrid: isDark ? "#1e1e38" : "#c2c8dc"
@@ -205,7 +205,7 @@ ApplicationWindow {
                         verticalAlignment: Text.AlignVCenter
                     }
                     background: Rectangle { color: parent.hovered ? root.bgInput : "transparent"; radius: 6 }
-                    onClicked: leftPanel.width = leftPanel.width > 10 ? 0 : 350
+                    onClicked: leftPanel.width = leftPanel.width > 10 ? 0 : 300
                 }
 
                 // Profile name
@@ -263,28 +263,40 @@ ApplicationWindow {
             Layout.fillWidth: true
             Layout.fillHeight: true
 
-            // ── Left panel (collapsible)
-            ColumnLayout {
+            // ── Left panel (collapsible, scrollable)
+            Item {
                 id: leftPanel
-                width: 350
+                width: 300
                 height: parent.height
-                spacing: 6
                 clip: true
-
-                property bool collapsed: false
                 Behavior on width { NumberAnimation { duration: 250; easing.type: Easing.OutCubic } }
 
-                // Live data card
-                LiveDataCard { id: liveCard; Layout.fillWidth: true }
+                Flickable {
+                    id: leftFlick
+                    anchors.fill: parent
+                    contentWidth: width
+                    contentHeight: panelCol.implicitHeight + 12
+                    flickableDirection: Flickable.VerticalFlick
+                    clip: true
 
-                // EN14055 limits card
-                LimitsCard { id: limitsCard; Layout.fillWidth: true }
+                    ScrollBar.vertical: ScrollBar {
+                        id: leftScrollBar
+                        policy: ScrollBar.AsNeeded
+                        visible: leftPanel.width > 10
+                    }
 
-                // Flush test card
-                FlushCard { id: flushCard; Layout.fillWidth: true; Layout.fillHeight: true }
+                    ColumnLayout {
+                        id: panelCol
+                        // leave 8 px gap so scrollbar doesn't overlap content
+                        width: leftFlick.width - (leftScrollBar.visible && leftScrollBar.size < 1 ? 8 : 0)
+                        spacing: 6
 
-                // Data log card
-                LogCard { Layout.fillWidth: true }
+                        LiveDataCard { id: liveCard; Layout.fillWidth: true }
+                        LimitsCard   { id: limitsCard; Layout.fillWidth: true }
+                        FlushCard    { id: flushCard; Layout.fillWidth: true }
+                        LogCard      { Layout.fillWidth: true }
+                    }
+                }
             }
 
             // ── Right panel: chart
@@ -387,7 +399,7 @@ ApplicationWindow {
                             text: "Clear"
                             implicitWidth: 52; implicitHeight: 30
                             contentItem: Text { text: parent.text; color: root.textPri; font.pixelSize: 11; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
-                            background: Rectangle { color: parent.hovered ? "#3a1f1f" : "#2c1818"; radius: 6 }
+                            background: Rectangle { color: parent.hovered ? "#8c3a3a" : "#6d2b2b"; radius: 6 }
                             onClicked: deltaLabel.text = "---"
                         }
                     }
@@ -474,7 +486,7 @@ Rectangle {
 
         // Header
         RowLayout {
-            Text { text: "LIVE DATA"; color: root.accentCol; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 1.5 }
+            Text { text: "LIVE DATA"; color: root.accentCol; font.pixelSize: 12; font.weight: Font.Bold; font.letterSpacing: 1.5 }
             Item { Layout.fillWidth: true }
             Rectangle { width: 8; height: 8; radius: 4; color: bridge.isConnected ? "#4ade80" : root.textMute
                 Behavior on color { ColorAnimation { duration: 400 } }
@@ -524,12 +536,12 @@ Rectangle {
             Text { text: "Flow";     color: root.textMute; font.pixelSize: 11 }
             Text { text: "Temp";     color: root.textMute; font.pixelSize: 11 }
 
-            Text { text: bridge.pressureStr;    color: root.textSec; font.pixelSize: 13; font.family: "monospace" }
+            Text { text: bridge.pressureStr;    color: root.textSec; font.pixelSize: 13; font.family: "monospace"; font.weight: Font.Medium }
             Text {
                 text: bridge.flow.toFixed(3) + " L/s"
-                color: "#fb923c"; font.pixelSize: 13; font.family: "monospace"
+                color: "#fb923c"; font.pixelSize: 13; font.family: "monospace"; font.weight: Font.Medium
             }
-            Text { text: bridge.temperatureStr; color: root.textSec; font.pixelSize: 13; font.family: "monospace" }
+            Text { text: bridge.temperatureStr; color: root.textSec; font.pixelSize: 13; font.family: "monospace"; font.weight: Font.Medium }
         }
 
         // Live headroom bar
@@ -579,7 +591,7 @@ Rectangle {
         spacing: 8
 
         // Header
-        Text { text: "EN 14055 LIMITS"; color: root.accentCol; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 1.5 }
+        Text { text: "EN 14055 LIMITS"; color: root.accentCol; font.pixelSize: 12; font.weight: Font.Bold; font.letterSpacing: 1.5 }
 
         // Action buttons — 2 columns
         GridLayout {
@@ -592,7 +604,7 @@ Rectangle {
                 id: btnManualMwlCwl
                 text: "Manual MWL/CWL"; Layout.columnSpan: 2; Layout.fillWidth: true
                 property bool pending: false
-                color: pending ? "#7a2e2e" : "#22234a"
+                color: pending ? "#7a2e2e" : root.btnDef
                 onClicked: {
                     pending = !pending
                     text = pending ? "Cancel Manual MWL/CWL" : "Manual MWL/CWL"
@@ -648,7 +660,7 @@ Rectangle {
             Layout.fillWidth: true
             text: bridge.cwlStatusStr
             color: root.colorForClass(bridge.cwlStatusClass)
-            font.pixelSize: 12; wrapMode: Text.WordWrap
+            font.pixelSize: 12; font.weight: Font.Medium; wrapMode: Text.WordWrap
             Behavior on color { ColorAnimation { duration: 300 } }
         }
         Text {
@@ -656,14 +668,14 @@ Rectangle {
             Layout.fillWidth: true
             text: root.cwlAutoStateText.text
             color: root.cwlAutoStateText.color
-            font.pixelSize: 12; wrapMode: Text.WordWrap
+            font.pixelSize: 12; font.weight: Font.Medium; wrapMode: Text.WordWrap
         }
         Text {
             id: rwlStateDisplay
             Layout.fillWidth: true
             text: root.rwlStateText.text
             color: root.rwlStateText.color
-            font.pixelSize: 12; wrapMode: Text.WordWrap
+            font.pixelSize: 12; font.weight: Font.Medium; wrapMode: Text.WordWrap
         }
     }
 }
@@ -692,7 +704,7 @@ Button {
 
 LIMIT_LABEL = """
 import QtQuick 2.15
-Text { color: root.textMute; font.pixelSize: 11 }
+Text { color: root.textMute; font.pixelSize: 11; font.weight: Font.Medium }
 """
 
 LIMIT_VALUE = """
@@ -700,7 +712,7 @@ import QtQuick 2.15
 Text {
     property alias color: self.color
     id: self
-    color: root.textSec; font.pixelSize: 12; font.family: "monospace"
+    color: root.textSec; font.pixelSize: 12; font.family: "monospace"; font.weight: Font.Medium
     elide: Text.ElideRight
 }
 """
@@ -721,7 +733,7 @@ Rectangle {
         anchors { fill: parent; margins: 14 }
         spacing: 8
 
-        Text { text: "DATA LOG"; color: root.accentCol; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 1.5 }
+        Text { text: "DATA LOG"; color: root.accentCol; font.pixelSize: 12; font.weight: Font.Bold; font.letterSpacing: 1.5 }
 
         Button {
             Layout.fillWidth: true; implicitHeight: 34
@@ -765,7 +777,7 @@ Rectangle {
         spacing: 8
 
         RowLayout {
-            Text { text: "FLUSH TEST  (EN 14055)"; color: root.accentCol; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 1.5 }
+            Text { text: "FLUSH TEST  (EN 14055)"; color: root.accentCol; font.pixelSize: 12; font.weight: Font.Bold; font.letterSpacing: 1.5 }
         }
 
         RowLayout {
