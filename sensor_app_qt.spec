@@ -38,6 +38,10 @@ a = Analysis(
             'pyqtgraph.graphicsItems.AxisItem',
             'pyqtgraph.graphicsItems.PlotItem',
             'pyqtgraph.widgets.PlotWidget',
+            'pyqtgraph.widgets.RemoteGraphicsView',
+            'pyqtgraph.multiprocess',
+            'pyqtgraph.multiprocess.remoteproxy',
+            'pyqtgraph.multiprocess.processes',
             # numpy
             'numpy',
             'numpy.core._multiarray_umath',
@@ -58,7 +62,9 @@ a = Analysis(
         # pyqtgraph extras we don't use
         'pyqtgraph.examples', 'pyqtgraph.opengl',
         'pyqtgraph.dockarea', 'pyqtgraph.flowchart',
-        'pyqtgraph.console', 'pyqtgraph.multiprocess',
+        'pyqtgraph.console',
+        # NOTE: pyqtgraph.multiprocess must NOT be excluded —
+        # pyqtgraph/__init__.py imports RemoteGraphicsView which depends on it.
         # Unused PySide6 modules
         'PySide6.QtQml', 'PySide6.QtQuick', 'PySide6.QtQuick3D',
         'PySide6.QtQuickControls2', 'PySide6.QtQuickWidgets',
