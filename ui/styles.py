@@ -15,13 +15,6 @@ class UiFonts:
     heading: int
 
 
-def _add_theme_color_if_exists(theme_attr: str, color: tuple[int, int, int], category: int) -> None:
-    """DearPyGui compatibility helper across versions with different theme enums."""
-    theme_token = getattr(dpg, theme_attr, None)
-    if theme_token is not None:
-        dpg.add_theme_color(theme_token, color, category=category)
-
-
 def _font_path(filename: str) -> str:
     path = FONTS_DIR / filename
     if not path.exists():
@@ -82,8 +75,8 @@ def create_tailwind_theme() -> int:
             dpg.add_theme_color(dpg.mvThemeCol_SliderGrab, (96, 165, 250), category=dpg.mvThemeCat_Core)
             dpg.add_theme_color(dpg.mvThemeCol_SliderGrabActive, (147, 197, 253), category=dpg.mvThemeCat_Core)
 
-            # Plot and accent colors (compatible across DearPyGui versions)
-            _add_theme_color_if_exists("mvThemeCol_PlotBg", (15, 23, 42), dpg.mvThemeCat_Plots)
-            _add_theme_color_if_exists("mvThemeCol_PlotBorder", (51, 65, 85), dpg.mvThemeCat_Plots)
-            _add_theme_color_if_exists("mvPlotCol_Line", (56, 189, 248), dpg.mvThemeCat_Plots)             # sky-400
+            # Plot and accent colors
+            dpg.add_theme_color(dpg.mvThemeCol_PlotBg, (15, 23, 42), category=dpg.mvThemeCat_Plots)
+            dpg.add_theme_color(dpg.mvThemeCol_PlotBorder, (51, 65, 85), category=dpg.mvThemeCat_Plots)
+            dpg.add_theme_color(dpg.mvPlotCol_Line, (56, 189, 248), category=dpg.mvThemeCat_Plots)         # sky-400
     return theme
