@@ -19,38 +19,40 @@
 
 import sys
 from pathlib import Path
+from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 block_cipher = None
+
+# collect_all ensures PySide6 DLLs, plugins, and Qt resources are bundled.
+# Without this, the frozen exe throws "No module named 'PySide6'" at runtime.
+_ps6 = collect_all('PySide6')
+_pg  = collect_all('pyqtgraph')
 
 a = Analysis(
     ['sensor_app_qt.py'],
     pathex=[str(Path('.').resolve())],
-    binaries=[],
-    datas=[],
-    hiddenimports=[
-        # PySide6 platform / image plugins that the hook may miss on some builds
-        'PySide6.QtWidgets',
-        'PySide6.QtGui',
-        'PySide6.QtCore',
-        'PySide6.QtOpenGL',
-        'PySide6.QtOpenGLWidgets',
-        # pyqtgraph internals
-        'pyqtgraph',
-        'pyqtgraph.graphicsItems',
-        'pyqtgraph.graphicsItems.PlotDataItem',
-        'pyqtgraph.graphicsItems.InfiniteLine',
-        'pyqtgraph.graphicsItems.TextItem',
-        'pyqtgraph.widgets.PlotWidget',
-        # numpy (transitive dep of pyqtgraph)
-        'numpy',
-        'numpy.core._multiarray_umath',
-        # pyserial
-        'serial',
-        'serial.tools',
-        'serial.tools.list_ports',
-        'serial.tools.list_ports_windows',
-        'serial.tools.list_ports_posix',
-    ],
+    binaries=_ps6[1] + _pg[1],
+    datas=_ps6[0] + _pg[0],
+    hiddenimports=(
+        _ps6[2] + _pg[2]
+        + collect_submodules('PySide6')
+        + [
+            # pyqtgraph internals that collect_all may still miss
+            'pyqtgraph.graphicsItems.PlotDataItem',
+            'pyqtgraph.graphicsItems.InfiniteLine',
+            'pyqtgraph.graphicsItems.TextItem',
+            'pyqtgraph.widgets.PlotWidget',
+            # numpy
+            'numpy',
+            'numpy.core._multiarray_umath',
+            # pyserial
+            'serial',
+            'serial.tools',
+            'serial.tools.list_ports',
+            'serial.tools.list_ports_windows',
+            'serial.tools.list_ports_posix',
+        ]
+    ),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
