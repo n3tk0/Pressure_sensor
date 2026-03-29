@@ -224,11 +224,13 @@ QWidget#chart_toolbar {
 """
 
 _QSS_LIGHT = """
-* { font-family: 'Segoe UI', 'Inter', 'SF Pro Display', sans-serif; font-size: 13px; }
+* { font-family: 'Segoe UI', 'Inter', 'SF Pro Display', sans-serif; font-size: 13px; color: #1e2140; }
 
-QMainWindow { background: #f0f2f8; }
-QWidget#central { background: #f0f2f8; color: #1e2140; }
-QWidget { background: #f0f2f8; color: #1e2140; }
+QMainWindow, QMainWindow > QWidget { background: #f0f2f8; }
+QWidget#central { background: #f0f2f8; }
+/* Scope to named containers only — broad QWidget rule breaks Fusion field painting */
+QWidget#top_bar, QWidget#chart_toolbar { background: #e2e6f2; }
+QGroupBox, QScrollArea > QWidget > QWidget { background: transparent; }
 
 QMenuBar { background: #e2e6f2; color: #3d4270; border-bottom: 1px solid #c8cedf; padding: 2px 0; }
 QMenuBar::item { padding: 4px 14px; border-radius: 4px; }
@@ -305,13 +307,9 @@ QLabel.blue   { color: #4a3fbf; }
 QLabel.gray, QLabel.muted { color: #8890b0; }
 QLabel.status { font-size: 12px; }
 
-QScrollBar:vertical { background: #dde2f0; width: 8px; border-radius: 4px; }
-QScrollBar::handle:vertical { background: #b8bee0; border-radius: 4px; min-height: 20px; }
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 QFrame[frameShape="4"], QFrame[frameShape="5"] { color: #c4cadc; }
 QStatusBar { background: #e2e6f2; color: #8890b0; border-top: 1px solid #c8cedf; }
 QScrollArea { border: none; background: transparent; }
-QScrollArea > QWidget > QWidget { background: transparent; }
 QWidget#top_bar { background: #e2e6f2; border: 1px solid #c4cadc; border-radius: 10px; }
 QWidget#chart_toolbar { background: #e2e6f2; border: 1px solid #c4cadc; border-radius: 10px; }
 """
@@ -723,6 +721,7 @@ class SensorMainWindow(QMainWindow):
         self._app.app_settings["ui_theme"] = mode
         QApplication.instance().setStyleSheet(
             _QSS_DARK if mode != "Light" else _QSS_LIGHT)
+        self._plot.apply_plot_theme(mode)
 
     # ── Toggle left panel ─────────────────────────────────────────────
 

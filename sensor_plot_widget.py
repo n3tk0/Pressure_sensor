@@ -79,24 +79,33 @@ class SensorPlotWidget(pg.PlotWidget):
     # ── Setup ────────────────────────────────────────────────────────────────
 
     def _setup_plot(self):
-        # Deep navy palette to match the new QSS dark theme
-        self.setBackground(QColor("#0d0d1f"))
         pi = self.getPlotItem()
         pi.showGrid(x=True, y=True, alpha=0.18)
-
-        # Style axis text and grid lines
-        axis_pen  = pg.mkPen(QColor("#1e1e40"))
-        text_pen  = QColor("#4a5568")
-        for axis_name in ("left", "bottom", "right", "top"):
-            ax = pi.getAxis(axis_name)
-            ax.setPen(axis_pen)
-            ax.setTextPen(text_pen)
-
-        pi.setLabel("left",   "Height", units="mm",  color="#4a5568")
-        pi.setLabel("bottom", "Time",   units="s",   color="#4a5568")
         pi.setMenuEnabled(False)
         self.setMouseTracking(True)
         self.scene().sigMouseMoved.connect(self._on_mouse_moved)
+        self.apply_plot_theme("Dark")
+
+    def apply_plot_theme(self, mode: str):
+        """Switch the pyqtgraph canvas colours to match the current UI theme."""
+        is_light = (mode == "Light")
+        if is_light:
+            bg       = QColor("#f0f2f8")
+            grid_pen = pg.mkPen(QColor("#c4cadc"))
+            text_col = "#6070a0"
+        else:
+            bg       = QColor("#0d0d1f")
+            grid_pen = pg.mkPen(QColor("#1e1e40"))
+            text_col = "#4a5568"
+
+        self.setBackground(bg)
+        pi = self.getPlotItem()
+        for axis_name in ("left", "bottom", "right", "top"):
+            ax = pi.getAxis(axis_name)
+            ax.setPen(grid_pen)
+            ax.setTextPen(QColor(text_col))
+        pi.setLabel("left",   "Height", units="mm", color=text_col)
+        pi.setLabel("bottom", "Time",   units="s",  color=text_col)
 
     def _setup_curves(self):
         lc = self._app.app_settings.get("line_colors", {k: list(v) for k, v in DEFAULT_LINE_COLORS.items()})
