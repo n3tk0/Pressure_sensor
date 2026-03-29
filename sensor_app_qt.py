@@ -432,9 +432,10 @@ class SensorMainWindow(QMainWindow):
     # ── Left panel ────────────────────────────────────────────────────
 
     def _build_left_panel(self) -> QWidget:
-        panel = QWidget(); panel.setFixedWidth(340)
+        # Inner content widget
+        panel = QWidget()
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(4, 0, 4, 0)
+        layout.setContentsMargins(4, 0, 4, 4)
         layout.setSpacing(6)
 
         # Live data
@@ -575,7 +576,15 @@ class SensorMainWindow(QMainWindow):
         layout.addWidget(g_log)
 
         layout.addStretch()
-        return panel
+
+        # Wrap in a scroll area so nothing is clipped on small windows
+        scroll = QScrollArea()
+        scroll.setWidget(panel)
+        scroll.setWidgetResizable(True)
+        scroll.setFixedWidth(348)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        return scroll
 
     # ── Right panel (chart) ───────────────────────────────────────────
 
