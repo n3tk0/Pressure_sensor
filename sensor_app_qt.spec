@@ -7,65 +7,68 @@
 #
 # Requirements in the build environment:
 #   pip install pyinstaller PySide6 pyqtgraph pyserial numpy
+#
+# Size notes:
+#   collect_all('PySide6') was removed from binaries/datas — it bundled the
+#   ENTIRE PySide6 directory (~250 MB) including QML runtimes, SQL drivers,
+#   WebEngine DLLs and translation files that we never use.
+#   The standard per-module hooks (hook-PySide6.QtWidgets.py, etc.) are
+#   sufficient: they collect only the DLLs for modules that are actually
+#   imported (QtCore, QtGui, QtWidgets, QtOpenGL, QtOpenGLWidgets, QtSvg).
 
-import sys
 from pathlib import Path
-from PyInstaller.utils.hooks import collect_all, collect_data_files
+from PyInstaller.utils.hooks import collect_data_files
 
 block_cipher = None
-
-# collect_all('PySide6') bundles DLLs + Qt plugins the standard hook misses.
-# pyqtgraph: only collect binaries/datas — NOT collect_all (that pulls examples).
-_ps6 = collect_all('PySide6')
-_pg_datas    = collect_data_files('pyqtgraph')
-_pg_binaries = []
 
 a = Analysis(
     ['sensor_app_qt.py'],
     pathex=[str(Path('.').resolve())],
-    binaries=_ps6[1] + _pg_binaries,
-    datas=_ps6[0] + _pg_datas,
-    hiddenimports=(
-        _ps6[2]
-        + [
-            # pyqtgraph core — only what sensor_plot_widget.py uses
-            'pyqtgraph',
-            'pyqtgraph.graphicsItems.PlotDataItem',
-            'pyqtgraph.graphicsItems.InfiniteLine',
-            'pyqtgraph.graphicsItems.TextItem',
-            'pyqtgraph.graphicsItems.LegendItem',
-            'pyqtgraph.graphicsItems.ViewBox',
-            'pyqtgraph.graphicsItems.AxisItem',
-            'pyqtgraph.graphicsItems.PlotItem',
-            'pyqtgraph.widgets.PlotWidget',
-            'pyqtgraph.widgets.RemoteGraphicsView',
-            'pyqtgraph.multiprocess',
-            'pyqtgraph.multiprocess.remoteproxy',
-            'pyqtgraph.multiprocess.processes',
-            # numpy
-            'numpy',
-            'numpy.core._multiarray_umath',
-            # pyserial
-            'serial',
-            'serial.tools',
-            'serial.tools.list_ports',
-            'serial.tools.list_ports_windows',
-            'serial.tools.list_ports_posix',
-        ]
-    ),
+    binaries=[],
+    # pyqtgraph ships shader/colormap data files; collect those only.
+    # PySide6 DLLs are handled automatically by the standard hooks.
+    datas=collect_data_files('pyqtgraph'),
+    hiddenimports=[
+        # pyqtgraph — core items used by sensor_plot_widget.py
+        'pyqtgraph',
+        'pyqtgraph.graphicsItems.PlotDataItem',
+        'pyqtgraph.graphicsItems.InfiniteLine',
+        'pyqtgraph.graphicsItems.TextItem',
+        'pyqtgraph.graphicsItems.LegendItem',
+        'pyqtgraph.graphicsItems.ViewBox',
+        'pyqtgraph.graphicsItems.AxisItem',
+        'pyqtgraph.graphicsItems.PlotItem',
+        'pyqtgraph.widgets.PlotWidget',
+        # pyqtgraph.multiprocess is imported at pyqtgraph/__init__ time via
+        # RemoteGraphicsView — must be bundled or the app crashes on startup.
+        'pyqtgraph.widgets.RemoteGraphicsView',
+        'pyqtgraph.multiprocess',
+        'pyqtgraph.multiprocess.remoteproxy',
+        'pyqtgraph.multiprocess.processes',
+        # numpy
+        'numpy',
+        'numpy.core._multiarray_umath',
+        # pyserial
+        'serial',
+        'serial.tools',
+        'serial.tools.list_ports',
+        'serial.tools.list_ports_windows',
+        'serial.tools.list_ports_posix',
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        # stdlib junk
+        # stdlib / testing junk
         'tkinter', 'matplotlib', 'scipy', 'IPython', 'pytest', 'dearpygui',
-        # pyqtgraph extras we don't use
-        'pyqtgraph.examples', 'pyqtgraph.opengl',
-        'pyqtgraph.dockarea', 'pyqtgraph.flowchart',
+        # pyqtgraph sub-packages we don't use
+        'pyqtgraph.examples',
+        'pyqtgraph.opengl',
+        'pyqtgraph.dockarea',
+        'pyqtgraph.flowchart',
         'pyqtgraph.console',
-        # NOTE: pyqtgraph.multiprocess must NOT be excluded —
-        # pyqtgraph/__init__.py imports RemoteGraphicsView which depends on it.
-        # Unused PySide6 modules
+        # Unused PySide6 Python modules — also prevents their hooks from
+        # pulling in extra DLLs beyond what the imports below already collect.
         'PySide6.QtQml', 'PySide6.QtQuick', 'PySide6.QtQuick3D',
         'PySide6.QtQuickControls2', 'PySide6.QtQuickWidgets',
         'PySide6.QtQuickTest', 'PySide6.QtWebView',
@@ -112,9 +115,10 @@ exe = EXE(
     strip=False,
     upx=True,
     upx_exclude=[
-        # Qt6 DLLs crash when UPX-compressed
+        # Qt6 DLLs and shiboken crash when UPX-compressed
         'Qt6Core.dll', 'Qt6Widgets.dll', 'Qt6Gui.dll',
         'Qt6OpenGL.dll', 'Qt6OpenGLWidgets.dll',
+        'Qt6Svg.dll', 'Qt6PrintSupport.dll',
         'shiboken6.abi3.dll',
     ],
     runtime_tmpdir=None,
