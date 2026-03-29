@@ -3,44 +3,40 @@
 # Build command (from repo root):
 #   pyinstaller sensor_app_qt.spec
 #
-# Output: dist/sensor_app_qt.exe  (single onefile executable, ~60-100 MB)
+# Output: dist/sensor_app_qt.exe  (single onefile executable)
 #
 # Requirements in the build environment:
 #   pip install pyinstaller PySide6 pyqtgraph pyserial numpy
-#
-# Notes:
-#   • pyqtgraph pulls in numpy; both are collected automatically.
-#   • PySide6 Qt platform plugins (qwindows.dll on Windows) are bundled by the
-#     PySide6 hook — no manual datas entries needed for them.
-#   • sensor_core.py, sensor_plot_widget.py, dialogs_qt.py are imported normally;
-#     PyInstaller follows imports automatically.
-#   • The config/ and exports/ directories are created at runtime next to the .exe
-#     (BASE_DIR logic in sensor_core.py handles frozen vs. script paths).
 
 import sys
 from pathlib import Path
-from PyInstaller.utils.hooks import collect_all, collect_submodules
+from PyInstaller.utils.hooks import collect_all, collect_data_files
 
 block_cipher = None
 
-# collect_all ensures PySide6 DLLs, plugins, and Qt resources are bundled.
-# Without this, the frozen exe throws "No module named 'PySide6'" at runtime.
+# collect_all('PySide6') bundles DLLs + Qt plugins the standard hook misses.
+# pyqtgraph: only collect binaries/datas — NOT collect_all (that pulls examples).
 _ps6 = collect_all('PySide6')
-_pg  = collect_all('pyqtgraph')
+_pg_datas    = collect_data_files('pyqtgraph')
+_pg_binaries = []
 
 a = Analysis(
     ['sensor_app_qt.py'],
     pathex=[str(Path('.').resolve())],
-    binaries=_ps6[1] + _pg[1],
-    datas=_ps6[0] + _pg[0],
+    binaries=_ps6[1] + _pg_binaries,
+    datas=_ps6[0] + _pg_datas,
     hiddenimports=(
-        _ps6[2] + _pg[2]
-        + collect_submodules('PySide6')
+        _ps6[2]
         + [
-            # pyqtgraph internals that collect_all may still miss
+            # pyqtgraph core — only what sensor_plot_widget.py uses
+            'pyqtgraph',
             'pyqtgraph.graphicsItems.PlotDataItem',
             'pyqtgraph.graphicsItems.InfiniteLine',
             'pyqtgraph.graphicsItems.TextItem',
+            'pyqtgraph.graphicsItems.LegendItem',
+            'pyqtgraph.graphicsItems.ViewBox',
+            'pyqtgraph.graphicsItems.AxisItem',
+            'pyqtgraph.graphicsItems.PlotItem',
             'pyqtgraph.widgets.PlotWidget',
             # numpy
             'numpy',
@@ -57,14 +53,22 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        # stdlib / test junk
+        # stdlib junk
         'tkinter', 'matplotlib', 'scipy', 'IPython', 'pytest', 'dearpygui',
-        # Unused PySide6 modules — keeps exe ~30-50 MB smaller
-        'PySide6.QtQml', 'PySide6.QtQuick', 'PySide6.QtQuickControls2',
-        'PySide6.QtQuickWidgets', 'PySide6.QtCharts', 'PySide6.QtDataVisualization',
-        'PySide6.QtWebEngine', 'PySide6.QtWebEngineCore', 'PySide6.QtWebEngineWidgets',
-        'PySide6.QtWebEngineQuick', 'PySide6.QtWebSockets', 'PySide6.QtWebChannel',
-        'PySide6.QtNetwork', 'PySide6.QtNetworkAuth',
+        # pyqtgraph extras we don't use
+        'pyqtgraph.examples', 'pyqtgraph.opengl',
+        'pyqtgraph.dockarea', 'pyqtgraph.flowchart',
+        'pyqtgraph.console', 'pyqtgraph.multiprocess',
+        # Unused PySide6 modules
+        'PySide6.QtQml', 'PySide6.QtQuick', 'PySide6.QtQuick3D',
+        'PySide6.QtQuickControls2', 'PySide6.QtQuickWidgets',
+        'PySide6.QtQuickTest', 'PySide6.QtWebView',
+        'PySide6.QtCharts', 'PySide6.QtDataVisualization',
+        'PySide6.QtGraphs', 'PySide6.QtGraphsWidgets',
+        'PySide6.QtWebEngine', 'PySide6.QtWebEngineCore',
+        'PySide6.QtWebEngineWidgets', 'PySide6.QtWebEngineQuick',
+        'PySide6.QtWebSockets', 'PySide6.QtWebChannel',
+        'PySide6.QtNetwork', 'PySide6.QtNetworkAuth', 'PySide6.QtHttpServer',
         'PySide6.QtMultimedia', 'PySide6.QtMultimediaWidgets',
         'PySide6.QtBluetooth', 'PySide6.QtNfc',
         'PySide6.QtLocation', 'PySide6.QtPositioning',
@@ -75,8 +79,11 @@ a = Analysis(
         'PySide6.QtHelp', 'PySide6.QtDesigner', 'PySide6.QtUiTools',
         'PySide6.QtTest', 'PySide6.QtConcurrent',
         'PySide6.QtRemoteObjects', 'PySide6.QtSensors', 'PySide6.QtSerialBus',
+        'PySide6.QtSerialPort', 'PySide6.QtAxContainer',
         'PySide6.QtStateMachine', 'PySide6.QtTextToSpeech',
         'PySide6.QtSpatialAudio', 'PySide6.QtScxml',
+        'PySide6.QtDBus', 'PySide6.QtCanvasPainter',
+        'PySide6.scripts', 'PySide6.support',
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
@@ -97,19 +104,19 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,              # compress with UPX if available (reduces size ~20%)
+    upx=True,
     upx_exclude=[
-        # PySide6 DLLs are incompatible with UPX compression
+        # Qt6 DLLs crash when UPX-compressed
         'Qt6Core.dll', 'Qt6Widgets.dll', 'Qt6Gui.dll',
         'Qt6OpenGL.dll', 'Qt6OpenGLWidgets.dll',
+        'shiboken6.abi3.dll',
     ],
     runtime_tmpdir=None,
-    console=False,         # no terminal window (GUI app)
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    # Optional: set icon  icon='assets/icon.ico',
     onefile=True,
 )
