@@ -251,9 +251,9 @@ def _refresh_limits():
     cache.set_if_exists("lbl_mwl_fault", _mm_rel(p.mwl_fault) if p.mwl_fault > 0 else "\u2014")
     cache.set("lbl_menis", f"{p.meniscus:+.1f} mm" if p.meniscus != 0 else "0.0 mm")
     cache.set("lbl_cwl", _mm_rel(p.cwl) if p.cwl > 0 else "\u2014")
-    cache.set("lbl_wd", _mm(p.water_discharge))
-    cache.set("lbl_overflow", _mm(of))
-    cache.set("lbl_profile", f"Active Profile: {p.name}")
+    cache.set_if_exists("lbl_wd", _mm(p.water_discharge))
+    cache.set_if_exists("lbl_overflow", _mm(of))
+    cache.set_if_exists("lbl_profile", f"Active Profile: {p.name}")
     cache.set_if_exists("lbl_residual", _mm(p.residual_wl))
 
     w = app.app_settings.get("avg_window", 0.5)
