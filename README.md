@@ -132,6 +132,10 @@ The spec file bundles the Samsung Sans fonts and the application icon automatica
 
 ---
 
-## License
+This project is maintained in free time. If it saved you development hours, consider supporting it.
+<p align="center">
+  <a href="https://revolut.me/petk0g">
+    <img src="https://img.shields.io/badge/Support-Revolut-0666EB?style=for-the-badge&logo=revolut&logoColor=white" />
+  </a>
+</p>
 
-Private / internal use.
