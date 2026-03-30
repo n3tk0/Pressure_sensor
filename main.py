@@ -247,10 +247,10 @@ def _refresh_limits():
             return f"{v:.1f} mm  ({d:+.1f} mm OF)"
         return f"{v:.1f} mm"
 
-    cache.set("lbl_mwl", _mm_rel(p.mwl))
+    cache.set_if_exists("lbl_mwl", _mm_rel(p.mwl))
     cache.set_if_exists("lbl_mwl_fault", _mm_rel(p.mwl_fault) if p.mwl_fault > 0 else "\u2014")
-    cache.set("lbl_menis", f"{p.meniscus:+.1f} mm" if p.meniscus != 0 else "0.0 mm")
-    cache.set("lbl_cwl", _mm_rel(p.cwl) if p.cwl > 0 else "\u2014")
+    cache.set_if_exists("lbl_menis", f"{p.meniscus:+.1f} mm" if p.meniscus != 0 else "0.0 mm")
+    cache.set_if_exists("lbl_cwl", _mm_rel(p.cwl) if p.cwl > 0 else "\u2014")
     cache.set_if_exists("lbl_wd", _mm(p.water_discharge))
     cache.set_if_exists("lbl_overflow", _mm(of))
     cache.set_if_exists("lbl_profile", f"Active Profile: {p.name}")
@@ -268,21 +268,21 @@ def _refresh_limits():
         if of > 0 and p.mwl > 0:
             sm = of - p.mwl
             col = COL_GREEN if sm >= 20 else COL_RED
-            cache.set("lbl_safety_margin_static", f"{sm:.1f} mm")
+            cache.set_if_exists("lbl_safety_margin_static", f"{sm:.1f} mm")
             dpg.configure_item("lbl_safety_margin_static", color=col)
         else:
-            cache.set("lbl_safety_margin_static", "\u2014")
+            cache.set_if_exists("lbl_safety_margin_static", "\u2014")
 
     if of > 0 and p.cwl > 0:
         diff = p.cwl - of
         if diff <= 10:
-            cache.set("lbl_airgap", f"CWL: {diff:+.1f} mm OF  \u2713 (\u226410)")
+            cache.set_if_exists("lbl_airgap", f"CWL: {diff:+.1f} mm OF  \u2713 (\u226410)")
             _bind_status("lbl_airgap", "theme_green")
         else:
-            cache.set("lbl_airgap", f"CWL: +{diff:.1f} mm OF  \u2717 (>10)")
+            cache.set_if_exists("lbl_airgap", f"CWL: +{diff:.1f} mm OF  \u2717 (>10)")
             _bind_status("lbl_airgap", "theme_red")
     else:
-        cache.set("lbl_airgap", "CWL: \u2014 (capture during fault test)")
+        cache.set_if_exists("lbl_airgap", "CWL: \u2014 (capture during fault test)")
         _bind_status("lbl_airgap", "theme_gray")
 
 
@@ -1490,8 +1490,8 @@ def build_gui():
         dpg.bind_item_font("lbl_f", _font_medium)
         dpg.bind_item_font("lbl_temp", _font_medium)
         for _tag in ("lbl_mwl", "lbl_mwl_fault", "lbl_cwl", "lbl_menis",
-                     "lbl_overflow", "lbl_residual", "lbl_safety_margin",
-                     "lbl_safety_margin_static"):
+                     "lbl_overflow", "lbl_residual", "lbl_wd",
+                     "lbl_safety_margin", "lbl_safety_margin_static"):
             dpg.bind_item_font(_tag, _font_medium)
 
     # Mouse handler
@@ -1567,6 +1567,9 @@ def _build_left_panel():
                 dpg.add_spacer(height=3)
                 dpg.add_text("Residual WL:", color=COL_GRAY)
                 dpg.add_text("0.0 mm", tag="lbl_residual")
+                dpg.add_spacer(height=3)
+                dpg.add_text("Water Disch.:", color=COL_GRAY)
+                dpg.add_text("0.0 mm", tag="lbl_wd")
             with dpg.group():
                 dpg.add_text("Meniscus:", color=COL_GRAY)
                 dpg.add_text("0.0 mm", tag="lbl_menis")
