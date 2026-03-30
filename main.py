@@ -79,6 +79,7 @@ class _LabelCache:
 
 # ── Module-level state ──────────────────────────────────────────────
 app = SensorApp()
+app._item_themes: dict[str, str] = {}  # UI theme tracking (not in sensor_core)
 cache = _LabelCache()
 _line_color_dpg_ids: dict[str, int] = {}
 _font_ui = None
