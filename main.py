@@ -257,7 +257,7 @@ def _refresh_limits():
     cache.set_if_exists("lbl_residual", _mm(p.residual_wl))
 
     w = app.app_settings.get("avg_window", 0.5)
-    dpg.set_item_label("btn_mwl",   f"Set NWL  (avg {w}s)")
+    dpg.set_item_label("btn_mwl",   f"Set WL  (avg {w}s)")
     dpg.set_item_label("btn_menis", f"Set Meniscus (avg {w}s)")
 
     show_manual = app.app_settings.get("cwl_mode") == "Manual" and app.cwl_state == "ARMED"
@@ -932,7 +932,7 @@ def _save_prog():
 # ── Line colors dialog ──────────────────────────────────────────────
 _LINE_COLOR_LABELS = {
     "sensor": "Sensor line",
-    "mwl":    "NWL (fill level)",
+    "mwl":    "WL (fill level)",
     "menis":  "Meniscus",
     "wd":     "Water Discharge",
     "cwl":    "CWL (fault)",
@@ -1096,7 +1096,7 @@ def update_ui():
         cache.set("lbl_cwl_st", f"RWL: {app.profile.residual_wl:.1f}mm captured")
         _bind_status("lbl_cwl_st", "theme_green")
     else:
-        cache.set("lbl_cwl_st", "RWL: IDLE (set NWL to arm)")
+        cache.set("lbl_cwl_st", "RWL: IDLE (set WL to arm)")
         _bind_status("lbl_cwl_st", "theme_gray")
 
     # MWL/CWL detection state
@@ -1250,6 +1250,155 @@ def frame_callback():
         update_hover_tooltip()
 
 
+# ── Help dialog ─────────────────────────────────────────────────────
+def _open_help_dlg():
+    if dpg.does_item_exist("dlg_help"):
+        dpg.delete_item("dlg_help")
+    with dpg.window(label="Help", modal=True, tag="dlg_help",
+                     width=640, height=560, no_resize=False, pos=[280, 100]):
+        with dpg.child_window(height=490, border=False):
+            dpg.add_text("EN 14055 Cistern Analytics", color=COL_ACCENT)
+            dpg.add_text("ifm PI1789 Pressure Sensor Interface", color=COL_GRAY)
+            dpg.add_separator()
+            dpg.add_spacer(height=4)
+
+            # Connection
+            dpg.add_text("CONNECTION", color=COL_ACCENT)
+            dpg.add_text(
+                "Connect Sensor: Opens a serial connection to the ifm AL1060 IO-Link\n"
+                "master. Configure COM port, baud rate, AL1060 port, and polling\n"
+                "interval in Settings > Hardware Connection. The sensor thread reads\n"
+                "pressure data from the PI1789 sensor via IO-Link PDIN frames.",
+                color=COL_WHITE)
+            dpg.add_spacer(height=4)
+
+            # Calibration
+            dpg.add_text("CALIBRATION", color=COL_ACCENT)
+            dpg.add_text(
+                "Edit Calibration Profile: Define pressure-to-height/volume mapping\n"
+                "points. At least 2 points are needed for linear interpolation.\n"
+                "Set the Overflow (OF) height and Water Discharge (WD) height here.\n"
+                "  - Overflow: The height where water begins to overflow the cistern.\n"
+                "  - Water Discharge: Height of the inlet valve orifice (lowest point).\n"
+                "Profiles can be saved/loaded as JSON and set as auto-load default.",
+                color=COL_WHITE)
+            dpg.add_spacer(height=4)
+
+            # EN 14055 Levels
+            dpg.add_text("EN 14055 WATER LEVELS", color=COL_ACCENT)
+            dpg.add_text(
+                "WL (Water Level): Normal fill level when the inlet valve closes.\n"
+                "  Safety margin c = OF - WL must be >= 20 mm.\n\n"
+                "MWL (Max Water Level): Highest level during inlet valve fault.\n"
+                "  Water overflows continuously at 0.28 L/s; MWL is where it stabilises.\n"
+                "  MWL - OF must be <= 20 mm.\n\n"
+                "CWL (Critical Water Level): Level 2 seconds after supply is cut off\n"
+                "  during the overflow fault test. CWL - OF must be <= 10 mm.\n\n"
+                "Meniscus: Surface tension level just above overflow lip.\n"
+                "  Meniscus - OF must be <= 5 mm.\n\n"
+                "RWL (Residual Water Level): Minimum height after a complete flush.\n"
+                "  Detected automatically after setting WL and triggering a flush.",
+                color=COL_WHITE)
+            dpg.add_spacer(height=4)
+
+            # Detection modes
+            dpg.add_text("MWL/CWL DETECTION", color=COL_ACCENT)
+            dpg.add_text(
+                "Auto-detect MWL/CWL: Press while water is overflowing at MWL\n"
+                "  (fault supply running). The detector watches for a >= 1.5 mm drop\n"
+                "  (supply cut-off), locates the exact cutoff moment in history, then\n"
+                "  captures CWL exactly 2 seconds later. MWL is the peak level.\n\n"
+                "Manual MWL/CWL: Pauses the chart. Click the MWL moment on the graph.\n"
+                "  The app averages the 1-second window before the click (= MWL) and\n"
+                "  reads the smoothed value at click + 2 seconds (= CWL).",
+                color=COL_WHITE)
+            dpg.add_spacer(height=4)
+
+            # Flush test
+            dpg.add_text("FLUSH TEST", color=COL_ACCENT)
+            dpg.add_text(
+                "Measures flush volume per EN 14055 clause 6. Select Full or Part\n"
+                "flush type, press Start, trigger the flush, press Stop (or wait for\n"
+                "auto-stop when water level rises back 5 mm above minimum for 2 s).\n\n"
+                "EN 14055 effective flow rate: The rate calculated by skipping the\n"
+                "first 1 L and last 2 L of the flush (shown as 'EN*' in the table).\n"
+                "Full flush limit: 6.0 L max. Part flush limit: 4.0 L max.\n"
+                "At least 3 measurements of each type are required.",
+                color=COL_WHITE)
+            dpg.add_spacer(height=4)
+
+            # Chart
+            dpg.add_text("CHART", color=COL_ACCENT)
+            dpg.add_text(
+                "Axis: Switch between Height (mm), Volume (L), and Flow Rate (L/s).\n"
+                "Window: Set the visible time window (10s to 5min, or All data).\n"
+                "Smooth: Apply SMA or EMA smoothing to the displayed line.\n"
+                "Pause: Freezes the chart and shows draggable WL/CWL limit lines.\n"
+                "Delta: Click two points on the chart to measure time and value delta.\n"
+                "Screenshot: Saves a PNG of the viewport to the exports folder.",
+                color=COL_WHITE)
+            dpg.add_spacer(height=4)
+
+            # Compliance
+            dpg.add_text("COMPLIANCE CHECK", color=COL_ACCENT)
+            dpg.add_text(
+                "Test > EN 14055 Compliance Check runs all standard checks:\n"
+                "  - Safety margin c (OF - WL >= 20 mm)\n"
+                "  - MWL fault level (<= 20 mm above OF)\n"
+                "  - CWL critical level (<= 10 mm above OF)\n"
+                "  - Meniscus (<= 5 mm above OF)\n"
+                "  - Air gap a (WD - CWL >= 20 mm, or manual confirmation)\n"
+                "  - Flush volumes (averages vs. limits, min 3 measurements)",
+                color=COL_WHITE)
+
+        dpg.add_separator()
+        dpg.add_button(label="Close", width=120,
+                       callback=lambda: dpg.delete_item("dlg_help"))
+
+
+# ── About dialog ────────────────────────────────────────────────────
+_APP_VERSION = "v1.0.0"
+
+def _open_about_dlg():
+    if dpg.does_item_exist("dlg_about"):
+        dpg.delete_item("dlg_about")
+    with dpg.window(label="About", modal=True, tag="dlg_about",
+                     width=420, height=340, no_resize=True, pos=[390, 220]):
+        dpg.add_spacer(height=8)
+        dpg.add_text("EN 14055 Cistern Analytics", color=COL_ACCENT)
+        dpg.add_text(f"Version {_APP_VERSION}", color=COL_GRAY)
+        dpg.add_spacer(height=8)
+        dpg.add_separator()
+        dpg.add_spacer(height=8)
+
+        dpg.add_text("Author:", color=COL_GRAY)
+        dpg.add_text("  Petko Georgiev", color=COL_WHITE)
+        dpg.add_spacer(height=6)
+
+        dpg.add_text("Hardware:", color=COL_GRAY)
+        dpg.add_text("  ifm PI1789 pressure sensor + AL1060 IO-Link master", color=COL_WHITE)
+        dpg.add_spacer(height=6)
+
+        dpg.add_text("Standard:", color=COL_GRAY)
+        dpg.add_text("  EN 14055:2015 — WC and urinal flushing cisterns", color=COL_WHITE)
+        dpg.add_spacer(height=8)
+        dpg.add_separator()
+        dpg.add_spacer(height=8)
+
+        dpg.add_text("GitHub:", color=COL_GRAY)
+        dpg.add_text("  github.com/n3tk0/Pressure_sensor", color=COL_ACCENT)
+        dpg.add_spacer(height=6)
+
+        dpg.add_text("Support the project:", color=COL_GRAY)
+        dpg.add_text("  revolut.me/petk0g", color=COL_GREEN)
+        dpg.add_spacer(height=8)
+        dpg.add_separator()
+
+        dpg.add_spacer(height=6)
+        dpg.add_button(label="Close", width=120,
+                       callback=lambda: dpg.delete_item("dlg_about"))
+
+
 # ══════════════════════════════════════════════════════════════════════
 # GUI CONSTRUCTION
 # ══════════════════════════════════════════════════════════════════════
@@ -1292,6 +1441,10 @@ def build_gui():
                 dpg.add_menu_item(label="Chart Line Colors...", callback=_open_line_colors_dlg)
             with dpg.menu(label="Test"):
                 dpg.add_menu_item(label="EN 14055 Compliance Check", callback=_check_compliance)
+            with dpg.menu(label="Help"):
+                dpg.add_menu_item(label="Help...", callback=_open_help_dlg)
+                dpg.add_separator()
+                dpg.add_menu_item(label="About...", callback=_open_about_dlg)
 
         # Status bar
         with dpg.table(header_row=False, borders_innerV=False, borders_outerH=False,
@@ -1382,7 +1535,7 @@ def _build_left_panel():
             dpg.add_table_column()
             dpg.add_table_column()
             with dpg.table_row():
-                dpg.add_button(label=f"Set NWL ({_avg}s)",
+                dpg.add_button(label=f"Set WL ({_avg}s)",
                                tag="btn_mwl", callback=_set_mwl, width=-1)
                 dpg.bind_item_theme("btn_mwl", "theme_btn_action")
                 dpg.add_button(label=f"Set Meniscus ({_avg}s)",
@@ -1403,7 +1556,7 @@ def _build_left_panel():
         # Limits grid
         with dpg.group(horizontal=True):
             with dpg.group(width=160):
-                dpg.add_text("NWL (fill):", color=COL_GRAY)
+                dpg.add_text("WL (fill):", color=COL_GRAY)
                 dpg.add_text("\u2014", tag="lbl_mwl")
                 dpg.add_spacer(height=3)
                 dpg.add_text("MWL (fault):", color=COL_GRAY)
@@ -1434,7 +1587,7 @@ def _build_left_panel():
         _bind_status("lbl_airgap", "theme_gray")
         dpg.add_text("CWL: IDLE \u2014 arm while at MWL", tag="lbl_cwl_auto_st")
         _bind_status("lbl_cwl_auto_st", "theme_gray")
-        dpg.add_text("RWL: IDLE (set NWL to arm)", tag="lbl_cwl_st")
+        dpg.add_text("RWL: IDLE (set WL to arm)", tag="lbl_cwl_st")
         _bind_status("lbl_cwl_st", "theme_gray")
 
         dpg.add_spacer(height=8)
@@ -1512,14 +1665,14 @@ def _build_right_panel():
             dpg.add_plot_axis(dpg.mvXAxis, label="Time (s)", tag="x_axis")
             with dpg.plot_axis(dpg.mvYAxis, label="Height (mm)", tag="y_axis"):
                 dpg.add_line_series([], [], tag="line_main",  label="Sensor")
-                dpg.add_line_series([], [], tag="line_mwl",   label="NWL",           show=False)
+                dpg.add_line_series([], [], tag="line_mwl",   label="WL",           show=False)
                 dpg.add_line_series([], [], tag="line_menis", label="Meniscus",       show=False)
                 dpg.add_line_series([], [], tag="line_wd",    label="Water Disch.",  show=False)
                 dpg.add_line_series([], [], tag="line_cwl",   label="CWL (fault)",   show=False)
                 dpg.add_scatter_series([], [], tag="scatter_click1", label="")
                 dpg.add_scatter_series([], [], tag="scatter_click2", label="")
 
-            dpg.add_drag_line(label="NWL [drag]", tag="drag_mwl",
+            dpg.add_drag_line(label="WL [drag]", tag="drag_mwl",
                               color=[100, 160, 255, 200],
                               default_value=0.0, vertical=False, show=False,
                               callback=_on_drag_mwl)
