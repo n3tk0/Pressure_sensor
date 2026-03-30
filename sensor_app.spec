@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-# PyInstaller spec for sensor_app
+# PyInstaller spec for EN 14055 Cistern Analytics
 # Builds a Windows GUI executable (no console window).
 #
 # Usage (on Windows):
@@ -14,18 +14,18 @@ from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 
 block_cipher = None
 
-# ── Collect DearPyGui data (shaders, fonts bundled inside the package) ──
-dpg_datas  = collect_data_files('dearpygui')
-dpg_bins   = collect_dynamic_libs('dearpygui')
+# ── Collect DearPyGui data (shaders bundled inside the package) ──────
+dpg_datas = collect_data_files('dearpygui')
+dpg_bins  = collect_dynamic_libs('dearpygui')
 
-# ── Application fonts bundled next to the exe ───────────────────────────
+# ── Application fonts bundled next to the exe ────────────────────────
 app_fonts = [
-    (os.path.join('fonts', 'Samsung Sans Bold.ttf'),     'fonts'),
-    (os.path.join('fonts', 'SamsungSans-Regular.ttf'),   'fonts'),
+    (os.path.join('fonts', 'Samsung Sans Bold.ttf'),   'fonts'),
+    (os.path.join('fonts', 'SamsungSans-Regular.ttf'), 'fonts'),
 ]
 
 a = Analysis(
-    ['sensor_app.py'],
+    ['main.py'],
     pathex=[],
     binaries=dpg_bins,
     datas=dpg_datas + app_fonts,
@@ -36,6 +36,10 @@ a = Analysis(
         'serial',
         'serial.tools',
         'serial.tools.list_ports',
+        # sensor_core and dpg_theme are imported by main.py at module level,
+        # so PyInstaller traces them automatically — listed here as a safety net.
+        'sensor_core',
+        'dpg_theme',
         'bisect',
         'threading',
         'json',
@@ -49,6 +53,7 @@ a = Analysis(
     excludes=[
         'tkinter', 'matplotlib', 'numpy', 'scipy', 'PIL',
         'PyQt5', 'PyQt6', 'wx', 'gi',
+        'unittest', 'pydoc', 'doctest', 'pydoc_data',
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
@@ -78,7 +83,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='icon.ico',        # taskbar / file icon
+    icon='icon.ico',
     version=None,
     uac_admin=False,
 )
