@@ -53,7 +53,7 @@ a = Analysis(
     excludes=[
         'tkinter', 'matplotlib', 'numpy', 'scipy', 'PIL',
         'PyQt5', 'PyQt6', 'wx', 'gi',
-        'unittest', 'pydoc', 'doctest',
+        'unittest', 'pydoc', 'doctest', 'pydoc_data',
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
