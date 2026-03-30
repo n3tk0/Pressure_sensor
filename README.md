@@ -1,6 +1,14 @@
-# EN 14055 Cistern Analytics
+<div align="center">
+  <h1>EN 14055 Cistern Analytics</h1>
+  <p><b>A desktop application for testing and verifying WC flushing cistern compliance with EN 14055:2015 using an IFM PI1789 pressure sensor over IO-Link via an IFM AL1060 master.</b></p>
 
-A desktop application for testing and verifying WC flushing cistern compliance with **EN 14055:2015** using an **IFM PI1789** pressure sensor over IO-Link via an **IFM AL1060** master.
+  [![ESP32-C3](https://img.shields.io/badge/IFM-PI1789-blue)](#)
+  [![FreeRTOS](https://img.shields.io/badge/IFM-AL1060-green)](#)
+  [![C++](https://img.shields.io/badge/Language-Python-00599C?logo=python)](#)
+  [![SPA](https://img.shields.io/badge/Frontend-DearPyGui-F7DF1E)](#)
+</div>
+
+
 
 ---
 
