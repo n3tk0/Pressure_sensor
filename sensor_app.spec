@@ -7,23 +7,23 @@
 #   pyinstaller sensor_app.spec
 #
 # Output: dist/sensor_app.exe
-
+ 
 import sys
 import os
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
-
+ 
 block_cipher = None
-
+ 
 # ── Collect DearPyGui data (shaders bundled inside the package) ──────
 dpg_datas = collect_data_files('dearpygui')
 dpg_bins  = collect_dynamic_libs('dearpygui')
-
+ 
 # ── Application fonts bundled next to the exe ────────────────────────
 app_fonts = [
     (os.path.join('fonts', 'Samsung Sans Bold.ttf'),   'fonts'),
     (os.path.join('fonts', 'SamsungSans-Regular.ttf'), 'fonts'),
 ]
-
+ 
 a = Analysis(
     ['main.py'],
     pathex=[],
@@ -53,16 +53,16 @@ a = Analysis(
     excludes=[
         'tkinter', 'matplotlib', 'numpy', 'scipy', 'PIL',
         'PyQt5', 'PyQt6', 'wx', 'gi',
-        'unittest', 'pydoc', 'doctest', 'pydoc_data',
+        'unittest', 'pydoc', 'doctest',
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
     noarchive=False,
 )
-
+ 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
-
+ 
 exe = EXE(
     pyz,
     a.scripts,
