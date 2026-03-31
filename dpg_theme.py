@@ -43,16 +43,58 @@ def setup_fonts():
     font_medium = None
     font_large = None
 
+    def _add_glyph_ranges(font_id):
+        """Add extended Unicode glyph ranges so symbols like —, ●, △, ✓ render."""
+        dpg.add_font_range_hint(dpg.mvFontRangeHint_Default, parent=font_id)
+        # Latin Extended-A/B
+        dpg.add_font_range(0x0100, 0x024F, parent=font_id)
+        # General Punctuation (em-dash U+2014, bullets U+2022, etc.)
+        dpg.add_font_range(0x2000, 0x206F, parent=font_id)
+        # Superscripts and Subscripts
+        dpg.add_font_range(0x2070, 0x209F, parent=font_id)
+        # Currency Symbols
+        dpg.add_font_range(0x20A0, 0x20CF, parent=font_id)
+        # Letterlike Symbols
+        dpg.add_font_range(0x2100, 0x214F, parent=font_id)
+        # Arrows
+        dpg.add_font_range(0x2190, 0x21FF, parent=font_id)
+        # Mathematical Operators (≥ ≤ ± etc.)
+        dpg.add_font_range(0x2200, 0x22FF, parent=font_id)
+        # Miscellaneous Technical
+        dpg.add_font_range(0x2300, 0x23FF, parent=font_id)
+        # Box Drawing
+        dpg.add_font_range(0x2500, 0x257F, parent=font_id)
+        # Block Elements
+        dpg.add_font_range(0x2580, 0x259F, parent=font_id)
+        # Geometric Shapes (▶ ◀ ● ◯ etc.)
+        dpg.add_font_range(0x25A0, 0x25FF, parent=font_id)
+        # Miscellaneous Symbols (⚠ etc.)
+        dpg.add_font_range(0x2600, 0x26FF, parent=font_id)
+        # Dingbats (✓ ✗ etc.)
+        dpg.add_font_range(0x2700, 0x27BF, parent=font_id)
+        # Greek letters (°C uses ° which is in Latin-1 Supplement)
+        dpg.add_font_range(0x0080, 0x00FF, parent=font_id)
+        # Miscellaneous Symbols and Arrows
+        dpg.add_font_range(0x2B00, 0x2BFF, parent=font_id)
+        # Delta Δ etc. from Greek
+        dpg.add_font_range(0x0370, 0x03FF, parent=font_id)
+
     with dpg.font_registry():
         if os.path.isfile(regular_path):
             default_font = dpg.add_font(regular_path, 18)
+            _add_glyph_ranges(default_font)
             font_ui = dpg.add_font(regular_path, 16)
+            _add_glyph_ranges(font_ui)
             font_medium = dpg.add_font(regular_path, 20)
+            _add_glyph_ranges(font_medium)
         if os.path.isfile(bold_path):
             bold_font = dpg.add_font(bold_path, 20)
+            _add_glyph_ranges(bold_font)
             font_large = dpg.add_font(bold_path, 30)
+            _add_glyph_ranges(font_large)
         elif os.path.isfile(regular_path):
             font_large = dpg.add_font(regular_path, 30)
+            _add_glyph_ranges(font_large)
 
     if font_ui:
         dpg.bind_font(font_ui)

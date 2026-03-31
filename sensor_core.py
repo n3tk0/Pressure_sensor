@@ -37,10 +37,41 @@ _PRESSURE_MAX_BAR: float = 10.0        # PI1789 rated range (0–10 bar)
 _PACKET_HEADER_SIZE: int = 12          # 2 SOF + 8 length hex + 2 reserved
 _RX_BUF_HIGH_WATERMARK: int = 4000
 _RX_BUF_LOW_WATERMARK: int = 2000
-_PDIN_TEMP_OFFSET = 8    # hex-string start index of temperature word
-_PDIN_TEMP_END    = 16   # hex-string end index  (4 bytes = 8 hex chars)
-_PDIN_TEMP_SCALE  = 0.1  # °C per LSB
+# PI1789 PDIN data layout (12 bytes / 24 hex chars):
+#   Bytes 0-3  (hex  0- 7) : Pressure  — unsigned 32-bit BE, 0.0001 bar/LSB
+#   Byte  4    (hex  8- 9) : Status    — 0xFF = OK
+#   Bytes 5-7  (hex 10-15) : Reserved
+#   Bytes 8-9  (hex 16-19) : Temperature — unsigned 16-bit BE, 0.01 °C/LSB
+#   Bytes 10-11(hex 20-23) : Device status
+_PDIN_TEMP_OFFSET = 16   # hex-string start index of temperature word
+_PDIN_TEMP_END    = 20   # hex-string end index  (2 bytes = 4 hex chars)
+_PDIN_TEMP_SCALE  = 0.01 # °C per LSB
+_PDIN_TEMP_MIN_C  = -40.0   # sanity min
+_PDIN_TEMP_MAX_C  = 200.0   # sanity max
 _TEMP_PLACEHOLDER = "-- °C"
+
+# Byte 4 (hex chars 8-9) — Sensor status flags
+_PDIN_STATUS_OFFSET = 8
+_PDIN_STATUS_END    = 10
+_STATUS_BIT_READY      = 0x80  # Bit 7: Device ready
+_STATUS_BIT_OVERRANGE  = 0x40  # Bit 6: Over-range
+_STATUS_BIT_UNDERRANGE = 0x20  # Bit 5: Under-range
+_STATUS_BIT_SP2        = 0x02  # Bit 1: Switching output SP2
+_STATUS_BIT_SP1        = 0x01  # Bit 0: Switching output SP1
+
+def _decode_sensor_status(status_byte: int) -> tuple[str, bool]:
+    """Decode PI1789 status byte into (label, is_ok).
+    
+    Bits are active-LOW: all bits = 1 (0xFF) means healthy.
+    A bit going to 0 indicates that fault condition.
+    """
+    if not (status_byte & _STATUS_BIT_READY):
+        return "FAULT", False
+    if not (status_byte & _STATUS_BIT_OVERRANGE):
+        return "Over-range", False
+    if not (status_byte & _STATUS_BIT_UNDERRANGE):
+        return "Under-range", False
+    return "OK", True
 
 # ── EN 14055:2015 constants ──────────────────────────────────────────
 EN14055_CWL_WAIT_S: float = 2.0
@@ -121,6 +152,7 @@ DEFAULT_APP = {
     "avg_window": 0.5, "cwl_mode": "Automatic", "cwl_drop_thresh": 1.5,
     "cwl_smooth": "SMA-5", "ui_refresh_ms": 50, "chart_refresh_ms": 100,
     "pressure_unit": "bar",
+    "temp_offset": 0.0,
     "ui_theme": "Dark",
     "line_colors": {k: list(v) for k, v in DEFAULT_LINE_COLORS.items()},
 }
@@ -219,19 +251,80 @@ def smooth(data, alg):
     # max_pts=12 000 and ≥100 ms interval. Switch SMA to running-sum if needed.
     if alg == "None" or len(data) < 2:
         return list(data)
+    n = len(data)
     r = []
+
+    # ── SMA (Simple Moving Average) ──
     if alg.startswith("SMA"):
         w = int(alg.split("-")[1])
-        for i in range(len(data)):
+        for i in range(n):
             s = max(0, i - w + 1)
             r.append(sum(data[s:i+1]) / (i - s + 1))
         return r
+
+    # ── EMA (Exponential Moving Average) ──
     if alg.startswith("EMA"):
         a = 0.2 if "Fast" in alg else 0.05
         r.append(data[0])
-        for i in range(1, len(data)):
+        for i in range(1, n):
             r.append(a * data[i] + (1 - a) * r[-1])
         return r
+
+    # ── DEMA (Double Exponential Moving Average) ──
+    if alg == "DEMA":
+        a = 0.15
+        ema1 = [data[0]]
+        for i in range(1, n):
+            ema1.append(a * data[i] + (1 - a) * ema1[-1])
+        ema2 = [ema1[0]]
+        for i in range(1, n):
+            ema2.append(a * ema1[i] + (1 - a) * ema2[-1])
+        return [2 * e1 - e2 for e1, e2 in zip(ema1, ema2)]
+
+    # ── Median Filter (window 5) ──
+    if alg.startswith("Median"):
+        w = 5
+        half = w // 2
+        for i in range(n):
+            lo = max(0, i - half)
+            hi = min(n, i + half + 1)
+            window = sorted(data[lo:hi])
+            r.append(window[len(window) // 2])
+        return r
+
+    # ── 1D Kalman Filter ──
+    if alg == "Kalman":
+        # Simple scalar Kalman: Q = process noise, R = measurement noise
+        Q = 0.01
+        R = 0.5
+        x_est = data[0]
+        p_est = 1.0
+        r.append(x_est)
+        for i in range(1, n):
+            # Predict
+            p_pred = p_est + Q
+            # Update
+            K = p_pred / (p_pred + R)
+            x_est = x_est + K * (data[i] - x_est)
+            p_est = (1 - K) * p_pred
+            r.append(x_est)
+        return r
+
+    # ── Savitzky-Golay (2nd-order polynomial, window 7) ──
+    if alg == "Savitzky-Golay":
+        # Pre-computed convolution coefficients for quadratic fit, window=7
+        # These are the standard SG coefficients for M=3 (half-window), order=2
+        coeffs = [-2, 3, 6, 7, 6, 3, -2]
+        norm = sum(coeffs)  # = 21
+        half = len(coeffs) // 2
+        r = list(data)  # copy; edges stay as-is
+        for i in range(half, n - half):
+            val = 0.0
+            for j, c in enumerate(coeffs):
+                val += c * data[i - half + j]
+            r[i] = val / norm
+        return r
+
     return list(data)
 
 
@@ -330,7 +423,9 @@ class SensorApp:
         self.current_height = 0.0
         self.current_volume = 0.0
         self.current_flow = 0.0
-        self.current_temperature = None  # °C from pdin bytes 4-7; None if sensor doesn't report it
+        self.current_temperature = None  # °C from pdin bytes 8-9; None if sensor doesn't report it
+        self.current_sensor_status = "--"   # decoded status string from pdin byte 4
+        self.current_sensor_status_ok = True # True if sensor is healthy
 
         self.cwl_state = "IDLE"
         self.cwl_peak = 0.0
@@ -410,9 +505,18 @@ class SensorApp:
                                         continue
                                     h, v = interp_hv(p_bar, self.profile.points)
                                     temp_c = None
+                                    sensor_status = "--"
+                                    sensor_status_ok = True
+                                    # Parse status byte (byte 4, hex chars 8-9)
+                                    if len(hx) >= _PDIN_STATUS_END:
+                                        sb = int(hx[_PDIN_STATUS_OFFSET:_PDIN_STATUS_END], 16)
+                                        sensor_status, sensor_status_ok = _decode_sensor_status(sb)
                                     if len(hx) >= _PDIN_TEMP_END:
-                                        raw_t = struct.unpack(">i", bytes.fromhex(hx[_PDIN_TEMP_OFFSET:_PDIN_TEMP_END]))[0]
-                                        temp_c = raw_t * _PDIN_TEMP_SCALE
+                                        raw_t = struct.unpack(">H", bytes.fromhex(hx[_PDIN_TEMP_OFFSET:_PDIN_TEMP_END]))[0]
+                                        t_val = raw_t * _PDIN_TEMP_SCALE
+                                        t_val += self.app_settings.get("temp_offset", 0.0)
+                                        if _PDIN_TEMP_MIN_C <= t_val <= _PDIN_TEMP_MAX_C:
+                                            temp_c = t_val
                                     with self.data_lock:
                                         t = time.monotonic() - self._start_monotonic
                                         f_rate = 0.0
@@ -426,6 +530,8 @@ class SensorApp:
                                         self.current_flow = f_rate
                                         if temp_c is not None:
                                             self.current_temperature = temp_c
+                                        self.current_sensor_status = sensor_status
+                                        self.current_sensor_status_ok = sensor_status_ok
                                         self.t_buf.append(t)
                                         self.p_buf.append(p_bar)
                                         self.h_buf.append(h)

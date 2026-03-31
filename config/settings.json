@@ -1,0 +1,51 @@
+{
+  "conn": {
+    "port": "COM8",
+    "baud": 115200,
+    "io_port": "Port 1",
+    "poll_ms": 50
+  },
+  "app": {
+    "avg_window": 0.5,
+    "cwl_mode": "Automatic",
+    "cwl_drop_thresh": 1.5,
+    "cwl_smooth": "SMA-5",
+    "ui_refresh_ms": 50,
+    "chart_refresh_ms": 100,
+    "pressure_unit": "kPa",
+    "ui_theme": "Light",
+    "line_colors": {
+      "sensor": [
+        137,
+        180,
+        250,
+        255
+      ],
+      "mwl": [
+        100,
+        200,
+        255,
+        255
+      ],
+      "menis": [
+        180,
+        130,
+        255,
+        255
+      ],
+      "wd": [
+        243,
+        139,
+        168,
+        255
+      ],
+      "cwl": [
+        250,
+        179,
+        90,
+        255
+      ]
+    },
+    "temp_offset": 0.0
+  }
+}

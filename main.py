@@ -154,7 +154,7 @@ def _toggle_connect():
         app.disconnect()
         dpg.set_item_label("btn_connect", "Connect Sensor")
         dpg.configure_item("lbl_conn",      default_value="Disconnected")
-        dpg.configure_item("lbl_conn_icon", default_value="\u25cf", color=COL_GRAY)
+        dpg.configure_item("lbl_conn_icon", default_value="\u2022", color=COL_GRAY)
         dpg.bind_item_theme("btn_connect", 0)
     else:
         app.last_error = ""
@@ -163,11 +163,11 @@ def _toggle_connect():
             dpg.set_item_label("btn_connect", "Disconnect")
             dpg.configure_item("lbl_conn",
                                default_value=f"{app.conn_params['port']}  {app.conn_params['baud']}bd")
-            dpg.configure_item("lbl_conn_icon", default_value="\u25cf", color=COL_GREEN)
+            dpg.configure_item("lbl_conn_icon", default_value="\u2022", color=COL_GREEN)
             dpg.bind_item_theme("btn_connect", "theme_btn_danger")
         elif app.last_error:
             dpg.configure_item("lbl_conn",      default_value=app.last_error)
-            dpg.configure_item("lbl_conn_icon", default_value="\u25cf", color=COL_RED)
+            dpg.configure_item("lbl_conn_icon", default_value="\u2022", color=COL_RED)
             _bind_status("lbl_conn", "theme_red")
 
 
@@ -614,7 +614,7 @@ def _toggle_left_panel():
     global _left_panel_visible
     _left_panel_visible = not _left_panel_visible
     dpg.configure_item("left_panel", show=_left_panel_visible)
-    dpg.set_item_label("btn_collapse", "\u25b6" if not _left_panel_visible else "\u25c0")
+    dpg.set_item_label("btn_collapse", ">>" if not _left_panel_visible else "<<")
 
 
 # ── Connection dialog ───────────────────────────────────────────────
@@ -752,8 +752,24 @@ def _open_calibration_dlg():
         _refresh_limits()
         dpg.delete_item("dlg_cal")
 
+    def save_cal_as_default():
+        """Save profile AND set it as the auto-load default."""
+        save_cal()
+        _save_as_default_profile()
+
+    # Check if a default profile is currently set
+    _default_fp = CONFIG_DIR / "default_profile.json"
+    _has_default = _default_fp.exists()
+    _default_name = ""
+    if _has_default:
+        try:
+            with open(_default_fp, encoding="utf-8") as _df:
+                _default_name = json.load(_df).get("name", "")
+        except Exception:
+            pass
+
     with dpg.window(label="Calibration Profile", modal=True, tag="dlg_cal",
-                     width=500, height=580, no_resize=True, pos=[350, 120]):
+                     width=500, height=620, no_resize=True, pos=[350, 100]):
         dpg.add_text("Profile Name:")
         dpg.add_input_text(default_value=clone.name, tag="cal_name", width=-1)
         with dpg.group(horizontal=True):
@@ -789,9 +805,15 @@ def _open_calibration_dlg():
             dpg.add_button(label="Import...", width=100,
                            callback=lambda: _cal_import(clone, refresh_table))
         dpg.add_separator()
+        # Default profile indicator
+        if _has_default and _default_name:
+            dpg.add_text(f"Startup default: {_default_name}", color=COL_GREEN)
+        else:
+            dpg.add_text("No startup default set", color=COL_GRAY)
         with dpg.group(horizontal=True):
-            dpg.add_button(label="Save Profile", width=140, callback=save_cal)
-            dpg.add_button(label="Cancel", width=140,
+            dpg.add_button(label="Save Profile", width=130, callback=save_cal)
+            dpg.add_button(label="Save & Set Default", width=140, callback=save_cal_as_default)
+            dpg.add_button(label="Cancel", width=100,
                            callback=lambda: dpg.delete_item("dlg_cal"))
 
 
@@ -869,7 +891,7 @@ def _open_program_dlg():
         dpg.delete_item("dlg_prog")
     s = app.app_settings
     with dpg.window(label="Program Settings", modal=True, tag="dlg_prog",
-                     width=400, height=490, no_resize=True, pos=[410, 180]):
+                     width=400, height=540, no_resize=True, pos=[410, 160]):
         dpg.add_text("Interface Theme:")
         dpg.add_combo(["Dark", "Light"],
                        default_value=s.get("ui_theme", "Dark"), tag="dlg_p_theme", width=-1)
@@ -886,7 +908,8 @@ def _open_program_dlg():
         dpg.add_combo(["0.5", "1.0", "1.5", "2.0", "5.0"],
                        default_value=str(s.get("cwl_drop_thresh", 1.5)), tag="dlg_p_thresh", width=-1)
         dpg.add_text("CWL Smooth:")
-        dpg.add_combo(["None", "SMA-5", "SMA-20", "EMA-Fast", "EMA-Slow"],
+        dpg.add_combo(["None", "SMA-5", "SMA-20", "EMA-Fast", "EMA-Slow",
+                       "DEMA", "Median-5", "Kalman", "Savitzky-Golay"],
                        default_value=s.get("cwl_smooth", "SMA-5"), tag="dlg_p_smth", width=-1)
         dpg.add_text("UI Refresh (ms):")
         dpg.add_combo(["20", "50", "100"],
@@ -894,6 +917,9 @@ def _open_program_dlg():
         dpg.add_text("Chart Refresh (ms):")
         dpg.add_combo(["30", "50", "100", "200"],
                        default_value=str(s.get("chart_refresh_ms", 100)), tag="dlg_p_ch_ref", width=-1)
+        dpg.add_text("Temperature Offset (°C):")
+        dpg.add_input_text(default_value=str(s.get("temp_offset", 0.0)),
+                           tag="dlg_p_temp_off", width=-1, hint="e.g. 47.6")
         dpg.add_separator()
         with dpg.group(horizontal=True):
             dpg.add_button(label="Save", width=110, callback=_save_prog)
@@ -922,6 +948,10 @@ def _save_prog():
     try:
         s["ui_refresh_ms"] = int(dpg.get_value("dlg_p_ui_ref"))
         s["chart_refresh_ms"] = int(dpg.get_value("dlg_p_ch_ref"))
+    except ValueError:
+        pass
+    try:
+        s["temp_offset"] = float(dpg.get_value("dlg_p_temp_off").replace(",", "."))
     except ValueError:
         pass
     save_settings(app.conn_params, app.app_settings)
@@ -1069,6 +1099,21 @@ def update_ui():
     cache.set_if_exists("lbl_f", f"{f:.3f} L/s")
     cache.set_if_exists("lbl_temp", f"{temp:.1f} \u00b0C" if temp is not None else _TEMP_PLACEHOLDER)
 
+    # Sensor status indicator
+    with app.data_lock:
+        status_text = app.current_sensor_status
+        status_ok = app.current_sensor_status_ok
+    if dpg.does_item_exist("lbl_sensor_status"):
+        cache.set("lbl_sensor_status", status_text)
+        if status_text == "OK":
+            dpg.configure_item("lbl_sensor_status", color=COL_GREEN)
+        elif status_text == "FAULT":
+            dpg.configure_item("lbl_sensor_status", color=COL_RED)
+        elif status_text == "--":
+            dpg.configure_item("lbl_sensor_status", color=COL_GRAY)
+        else:  # Over-range, Under-range
+            dpg.configure_item("lbl_sensor_status", color=COL_ORANGE)
+
     of = app.profile.overflow
     if dpg.does_item_exist("lbl_safety_margin"):
         if of > 0:
@@ -1121,9 +1166,28 @@ def update_ui():
             _bind_status("lbl_cwl_auto_st", "theme_gray")
 
 
+_AXIS_LABELS = {
+    "Height (mm)": "Height (mm)",
+    "Volume (L)": "Volume (L)",
+    "Flow Rate (L/s)": "Flow Rate (L/s)",
+}
+
+def _on_plot_axis_change(sender, value):
+    """Called when the user switches the Axis combo."""
+    label = _AXIS_LABELS.get(value, "Height (mm)")
+    dpg.configure_item("y_axis", label=label)
+    # Force immediate chart redraw so user sees the change right away
+    update_chart()
+
+
 def update_chart():
     """Update chart series — thread-safe snapshot of deque data."""
     plot_idx = dpg.get_value("combo_plot")
+
+    # Keep Y-axis label in sync with the selected axis
+    y_label = _AXIS_LABELS.get(plot_idx, "Height (mm)")
+    dpg.configure_item("y_axis", label=y_label)
+
     # Thread-safe: copy deques under lock
     with app.data_lock:
         t_snap = list(app.t_buf)
@@ -1451,12 +1515,14 @@ def build_gui():
                        borders_outerV=False, resizable=False):
             dpg.add_table_column(width_fixed=True, init_width_or_weight=28)
             dpg.add_table_column(init_width_or_weight=1.0)
+            dpg.add_table_column(width_fixed=True, init_width_or_weight=60)
             dpg.add_table_column(width_fixed=True, init_width_or_weight=180)
             dpg.add_table_column(width_fixed=True, init_width_or_weight=160)
             with dpg.table_row():
-                dpg.add_button(label="\u25c0", tag="btn_collapse",
+                dpg.add_button(label="<<", tag="btn_collapse",
                                callback=_toggle_left_panel, width=24)
                 dpg.add_text("Active Profile: Untitled Profile", tag="lbl_profile")
+                dpg.add_text("--", tag="lbl_sensor_status", color=COL_GRAY)
                 with dpg.group(horizontal=True):
                     dpg.add_text("", tag="lbl_conn_icon", color=COL_GRAY)
                     dpg.add_text("Disconnected", tag="lbl_conn", color=COL_GRAY)
@@ -1634,30 +1700,37 @@ def _build_left_panel():
 def _build_right_panel():
     """Construct the right panel with chart toolbar and plot."""
     with dpg.child_window(border=False):
-        # Toolbar
-        with dpg.group(horizontal=True):
-            dpg.add_text("Axis:")
-            dpg.add_combo(["Height (mm)", "Volume (L)", "Flow Rate (L/s)"],
-                          default_value="Height (mm)", tag="combo_plot", width=132)
-            dpg.add_spacer(width=4)
-            dpg.add_text("Window:")
-            dpg.add_combo(["10s", "30s", "60s", "5min", "All"],
-                          default_value="30s", tag="combo_win", width=72)
-            dpg.add_spacer(width=4)
-            dpg.add_text("Smooth:")
-            dpg.add_combo(["None", "SMA-5", "SMA-20", "EMA-Fast", "EMA-Slow"],
-                          default_value="None", tag="combo_smth", width=100)
-            dpg.add_spacer(width=8)
-            dpg.add_checkbox(label="Auto-scroll", tag="chk_autoscroll", default_value=True)
-            dpg.add_spacer(width=4)
-            dpg.add_button(label="Pause", tag="btn_pause",
-                           callback=_toggle_pause, width=78)
-            dpg.add_button(label="Screenshot", callback=_export_screenshot, width=100)
-            dpg.add_button(label="Colors", callback=_open_line_colors_dlg, width=58)
-            dpg.add_spacer(width=8)
-            dpg.add_text("Delta:", color=COL_GRAY)
-            dpg.add_text("---", tag="lbl_delta", color=COL_ACCENT)
-            dpg.add_button(label="Clear", callback=_clear_delta, width=50)
+        # Toolbar — use a table so Clear is pinned to the far right
+        with dpg.table(header_row=False, borders_innerV=False, borders_outerH=False,
+                       borders_outerV=False, borders_innerH=False, resizable=False):
+            dpg.add_table_column()  # flexible: all toolbar items
+            dpg.add_table_column(width_fixed=True, init_width_or_weight=50)  # fixed: Clear
+            with dpg.table_row():
+                with dpg.group(horizontal=True):
+                    dpg.add_text("Axis:")
+                    dpg.add_combo(["Height (mm)", "Volume (L)", "Flow Rate (L/s)"],
+                                  default_value="Height (mm)", tag="combo_plot", width=132,
+                                  callback=_on_plot_axis_change)
+                    dpg.add_spacer(width=4)
+                    dpg.add_text("Window:")
+                    dpg.add_combo(["10s", "30s", "60s", "5min", "All"],
+                                  default_value="30s", tag="combo_win", width=72)
+                    dpg.add_spacer(width=4)
+                    dpg.add_text("Smooth:")
+                    dpg.add_combo(["None", "SMA-5", "SMA-20", "EMA-Fast", "EMA-Slow",
+                                   "DEMA", "Median-5", "Kalman", "Savitzky-Golay"],
+                                  default_value="None", tag="combo_smth", width=130)
+                    dpg.add_spacer(width=8)
+                    dpg.add_checkbox(label="Auto-scroll", tag="chk_autoscroll", default_value=True)
+                    dpg.add_spacer(width=4)
+                    dpg.add_button(label="Pause", tag="btn_pause",
+                                   callback=_toggle_pause, width=78)
+                    dpg.add_button(label="Screenshot", callback=_export_screenshot, width=100)
+                    dpg.add_button(label="Colors", callback=_open_line_colors_dlg, width=58)
+                    dpg.add_spacer(width=8)
+                    dpg.add_text("Delta:", color=COL_GRAY)
+                    dpg.add_text("---", tag="lbl_delta", color=COL_ACCENT)
+                dpg.add_button(label="Clear", callback=_clear_delta, width=-1)
 
         dpg.add_spacer(height=2)
 
@@ -1715,7 +1788,7 @@ def main():
             dpg.set_item_label("btn_connect", "Disconnect")
             dpg.configure_item("lbl_conn",
                                default_value=f"{app.conn_params['port']}  {app.conn_params['baud']}bd")
-            dpg.configure_item("lbl_conn_icon", default_value="\u25cf", color=COL_GREEN)
+            dpg.configure_item("lbl_conn_icon", default_value="\u2022", color=COL_GREEN)
             dpg.bind_item_theme("btn_connect", "theme_btn_danger")
         elif app.last_error:
             dpg.configure_item("lbl_conn", default_value=app.last_error[:48])
