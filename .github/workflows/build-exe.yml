@@ -5,17 +5,18 @@ on:
     branches:
       - main
       - master
-      - 'claude/**'
     paths:
-      - 'sensor_app.py'
-      - 'sensor_app.spec'
+      - 'main.py'
+      - 'sensor_core.py'
+      - 'dpg_theme.py'
+      - 'main.spec'
       - 'fonts/**'
       - 'icon.ico'
       - '.github/workflows/build-exe.yml'
   workflow_dispatch:   # allow manual trigger from GitHub Actions tab
 
 permissions:
-  contents: write   # needed to push the rebuilt EXE back to the branch
+  contents: write
 
 jobs:
   build:
@@ -39,21 +40,21 @@ jobs:
 
       - name: Build EXE with PyInstaller
         run: |
-          pyinstaller sensor_app.spec --clean --noconfirm
+          pyinstaller main.spec --clean --noconfirm
 
       - name: Verify EXE was created
         run: |
-          if (Test-Path "dist\sensor_app.exe") {
-            $size = (Get-Item "dist\sensor_app.exe").length / 1MB
-            Write-Host "sensor_app.exe built successfully ($([math]::Round($size,1)) MB)"
+          if (Test-Path "dist\CisternAnalytics.exe") {
+            $size = (Get-Item "dist\CisternAnalytics.exe").length / 1MB
+            Write-Host "CisternAnalytics.exe built successfully ($([math]::Round($size,1)) MB)"
           } else {
-            Write-Error "Build failed — sensor_app.exe not found"
+            Write-Error "Build failed — CisternAnalytics.exe not found"
             exit 1
           }
 
       - name: Upload EXE as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: sensor_app-windows
-          path: dist/sensor_app.exe
+          name: CisternAnalytics-windows
+          path: dist/CisternAnalytics.exe
           retention-days: 30

@@ -2,13 +2,11 @@
   <h1>EN 14055 Cistern Analytics</h1>
   <p><b>A desktop application for testing and verifying WC flushing cistern compliance with EN 14055:2015 using an IFM PI1789 pressure sensor over IO-Link via an IFM AL1060 master.</b></p>
 
-  [![ESP32-C3](https://img.shields.io/badge/IFM-PI1789-blue)](#)
-  [![FreeRTOS](https://img.shields.io/badge/IFM-AL1060-green)](#)
-  [![C++](https://img.shields.io/badge/Language-Python-00599C?logo=python)](#)
-  [![SPA](https://img.shields.io/badge/Frontend-DearPyGui-F7DF1E)](#)
+  [![IFM PI1789](https://img.shields.io/badge/IFM-PI1789-blue)](#)
+  [![IFM AL1060](https://img.shields.io/badge/IFM-AL1060-green)](#)
+  [![Python](https://img.shields.io/badge/Language-Python-00599C?logo=python)](#)
+  [![DearPyGui](https://img.shields.io/badge/Frontend-DearPyGui-F7DF1E)](#)
 </div>
-
-
 
 ---
 
@@ -27,10 +25,12 @@
 ## Features
 
 ### Real-time monitoring
-- Live water level (mm), volume (L), pressure (bar) and flow rate (L/s)
-- Configurable smoothing algorithms: None, SMA-5, SMA-10, SMA-20, Median-5
+- Live water level (mm), volume (L), pressure (bar/mbar/kPa), temperature (°C) and flow rate (L/s)
+- Sensor health status indicator (OK / Fault / Over-range / Under-range)
+- 9 smoothing algorithms: None, SMA-5, SMA-20, EMA-Fast, EMA-Slow, DEMA, Median-5, Kalman, Savitzky-Golay
+- Switchable chart axis: Height (mm), Volume (L), Flow Rate (L/s)
 - Full scrollable graph history — pan and zoom into any past moment
-- Pause freezes the entire data snapshot, not just the view window
+- Delta measurement — click two points on the chart to measure the difference
 - Dark and light theme (Catppuccin-inspired)
 
 ### EN 14055:2015 compliance testing
@@ -66,15 +66,22 @@ Seat  (seals minimum — V = 0 L calibration point)
 - Results table with volume, duration, average rate, and EN 14055 effective rate
 
 ### Chart
-- Height (mm) or volume (L) view
+- Switchable Y-axis: Height (mm), Volume (L), or Flow Rate (L/s)
 - Horizontal limit lines: NWL, MWL, CWL, Meniscus, Overflow
 - Customisable line colours via dialog
 - Drag lines to adjust NWL and CWL while paused
-- Click two points to measure the difference
+- Click two points to measure the difference (Delta)
+
+### Calibration profiles
+- Pressure → height → volume interpolation with unlimited calibration points
+- "Read Sensor" button to auto-fill current pressure when adding a point
+- Save/load profiles to JSON, import/export calibration data
+- **Set as Default** — selected profile auto-loads on every startup
 
 ### Data export
 - CSV logging: timestamp, pressure, height, volume, flow rate
 - Atomic file writes (no partial files on crash)
+- Chart screenshots (PNG export)
 
 ---
 
@@ -87,48 +94,86 @@ Seat  (seals minimum — V = 0 L calibration point)
 
 The sensor is mounted at the cistern base. Water height and volume are calculated from pressure via a user-defined calibration table (pressure → height → volume interpolation).
 
+### PI1789 process data (PDIN) layout
+
+| Bytes | Description | Format |
+|-------|-------------|--------|
+| 0–3 | Pressure | Unsigned 32-bit BE, 0.0001 bar/LSB |
+| 4 | Sensor status | Bit flags (active-LOW): Ready, Over-range, Under-range |
+| 5–7 | Reserved | — |
+| 8–9 | Temperature | Unsigned 16-bit BE, 0.01 °C/LSB |
+| 10–11 | Device status | — |
+
 ---
 
 ## Calibration
 
-Open **Settings → Calibration Profile** and add pressure/height/volume points:
+Open **Settings → Edit Calibration Profile** and add pressure/height/volume points:
 
 1. **Seat point** — cistern empty (seals only): measure pressure, enter height, set volume = 0.0 L.
 2. **NWL point** — normal fill level (where the float closes the inlet valve): measure pressure and height, enter fill volume.
 3. Additional intermediate points improve accuracy at part-fill levels.
 4. Set **Overflow (mm)** — height of the overflow pipe inlet.
+5. Click **Save & Set Default** to auto-load this profile on startup.
 
 ---
 
 ## Installation
 
+### Prerequisites
+
+- Python 3.10+ (tested on 3.11 and 3.14)
+- Windows 10/11
+
 ### Run from source
 
 ```bash
 pip install dearpygui pyserial
-python sensor_app.py
+python main.py
 ```
 
-### Windows EXE
+### Build single-file Windows EXE
 
-Pre-built executables are in the `output/` folder or download from [GitHub Actions artifacts](../../actions/workflows/build-exe.yml).
+#### Option 1: Local build
 
-To build locally on Windows:
-
-```bat
+```bash
 pip install pyinstaller dearpygui pyserial
-pyinstaller sensor_app.spec --clean --noconfirm
+pyinstaller main.spec --clean --noconfirm
 ```
 
-The spec file bundles the Samsung Sans fonts and the application icon automatically. The resulting EXE has no console window.
+The resulting `CisternAnalytics.exe` will be in the `dist/` folder. It bundles the Samsung Sans fonts and application icon. No console window.
+
+#### Option 2: GitHub Actions (automatic)
+
+Every push to `main`/`master` that changes source files triggers an automatic build via GitHub Actions. Download the latest EXE from [Actions → Build Windows EXE → Artifacts](../../actions/workflows/build-exe.yml).
+
+You can also trigger a build manually from the Actions tab using **workflow_dispatch**.
+
+---
+
+## Project structure
+
+```
+main.py           — Application entry point and DearPyGui UI
+sensor_core.py    — Sensor communication, data processing, EN 14055 logic
+dpg_theme.py      — Font loading, theme setup
+main.spec         — PyInstaller build configuration
+icon.ico          — Application icon
+fonts/            — Samsung Sans TTF fonts
+config/           — Runtime settings and default profile (gitignored)
+exports/          — CSV data exports (gitignored)
+screenshots/      — README images
+tests/            — Unit tests
+```
 
 ---
 
 ## Sensor connection
 
 1. Connect the IFM AL1060 master via USB.
-2. In the app: **Settings → Program Settings**, select the COM port.
+2. In the app: **Settings → Hardware Connection**, select the COM port and baud rate.
 3. Click **Connect Sensor**.
+4. The status bar shows connection state and sensor health (OK / Fault).
 
 ---
 
@@ -138,4 +183,3 @@ This project is maintained in free time. If it saved you development hours, cons
     <img src="https://img.shields.io/badge/Support-Revolut-0666EB?style=for-the-badge&logo=revolut&logoColor=white" />
   </a>
 </p>
-

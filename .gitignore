@@ -2,7 +2,6 @@ EN14055.pdf
 make_screenshots.py
 
 # Built executables — downloaded from GitHub Actions artifacts, not tracked in git
-output/*.exe
 dist/
 build/
 *.spec.bak
@@ -12,3 +11,8 @@ __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
+
+# Runtime data
+exports/*.csv
+config/settings.json
+config/default_profile.json
