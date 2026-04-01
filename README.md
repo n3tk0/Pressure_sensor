@@ -16,10 +16,6 @@
 
 ![Main window showing live water level graph with EN14055 limit lines, left panel with live data and limit captures, and flush measurement table](screenshots/screenshot_main.png)
 
-### EN 14055 compliance check dialog
-
-![Compliance check dialog showing all pass/fail results for safety margin, MWL, CWL, meniscus and flush volumes](screenshots/screenshot_compliance.png)
-
 ---
 
 ## Features
