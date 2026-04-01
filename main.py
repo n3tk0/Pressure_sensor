@@ -83,6 +83,7 @@ app._item_themes: dict[str, str] = {}  # UI theme tracking (not in sensor_core)
 cache = _LabelCache()
 _line_color_dpg_ids: dict[str, int] = {}
 _font_ui = None
+_font_bold = None
 _font_medium = None
 _font_large = None
 
@@ -127,9 +128,6 @@ def _apply_theme(mode: str):
     acc = COL_ACCENT if is_dark else LT_ACCENT
     grn = COL_GREEN if is_dark else LT_GREEN
     gry = COL_GRAY if is_dark else LT_GRAY
-    for tag in ("hdr_live", "hdr_limits", "hdr_flush", "hdr_log"):
-        if dpg.does_item_exist(tag):
-            dpg.configure_item(tag, color=acc)
     for tag in ("lbl_h",):
         if dpg.does_item_exist(tag):
             dpg.configure_item(tag, color=acc)
@@ -476,9 +474,11 @@ def _toggle_log():
 def _toggle_pause():
     app.chart_paused = not app.chart_paused
     if app.chart_paused:
+        # Final update before freezing — shows data up to this point
         update_chart()
         dpg.set_item_label("btn_pause", "Resume")
         dpg.bind_item_theme("btn_pause", "theme_btn_success")
+        # Unlock axes so user can freely pan & zoom
         dpg.set_axis_limits_auto("x_axis")
         dpg.set_axis_limits_auto("y_axis")
         if "Height" in dpg.get_value("combo_plot"):
@@ -491,6 +491,31 @@ def _toggle_pause():
         dpg.bind_item_theme("btn_pause", 0)
         dpg.configure_item("drag_mwl", show=False)
         dpg.configure_item("drag_cwl", show=False)
+        # Immediately catch up with all accumulated data
+        update_chart()
+
+
+def _clear_chart():
+    """Safely clear all data deques and reset the plot."""
+    with app.data_lock:
+        app.t_buf.clear()
+        app.p_buf.clear()
+        app.h_buf.clear()
+        app.v_buf.clear()
+        app.f_buf.clear()
+        app._start_monotonic = time.monotonic()
+    app.last_t = []
+    app.last_y = []
+    # Reset all plot series
+    dpg.set_value("line_main", [[], []])
+    for tag in ["line_mwl", "line_menis", "line_wd", "line_cwl"]:
+        dpg.set_value(tag, [[], []])
+        dpg.configure_item(tag, show=False)
+    dpg.set_value("scatter_click1", [[], []])
+    dpg.set_value("scatter_click2", [[], []])
+    _clear_delta()
+    dpg.set_axis_limits_auto("x_axis")
+    dpg.set_axis_limits_auto("y_axis")
 
 
 def _on_drag_mwl(sender, value):
@@ -1207,27 +1232,32 @@ def update_chart():
     app.last_t = t_snap
     app.last_y = y_s
 
+    # When paused, skip updating the plot series and axis limits
+    # so the user can freely pan & zoom the frozen view.
+    # Data keeps accumulating in the deques in the background.
+    if app.chart_paused:
+        return
+
     dpg.set_value("line_main", [app.last_t, app.last_y])
 
-    if not app.chart_paused:
-        auto_scroll = dpg.get_value("chk_autoscroll")
-        ws = dpg.get_value("combo_win")
-        secs = {"10s": 10, "30s": 30, "60s": 60, "5min": 300}.get(ws, None)
-        if auto_scroll and secs and t_snap:
-            x_max = t_snap[-1]
-            x_min = max(t_snap[0], x_max - secs)
-            if x_max - x_min < 1:
-                x_max = x_min + 1
-            dpg.set_axis_limits("x_axis", x_min, x_max)
-            start_i = bisect.bisect_left(t_snap, x_min)
-            y_view = y_s[start_i:] if start_i < len(y_s) else y_s
-            if y_view:
-                y_lo, y_hi = min(y_view), max(y_view)
-                margin = max((y_hi - y_lo) * 0.1, 0.5)
-                dpg.set_axis_limits("y_axis", y_lo - margin, y_hi + margin)
-        else:
-            dpg.set_axis_limits_auto("x_axis")
-            dpg.set_axis_limits_auto("y_axis")
+    auto_scroll = dpg.get_value("chk_autoscroll")
+    ws = dpg.get_value("combo_win")
+    secs = {"10s": 10, "30s": 30, "60s": 60, "5min": 300}.get(ws, None)
+    if auto_scroll and secs and t_snap:
+        x_max = t_snap[-1]
+        x_min = max(t_snap[0], x_max - secs)
+        if x_max - x_min < 1:
+            x_max = x_min + 1
+        dpg.set_axis_limits("x_axis", x_min, x_max)
+        start_i = bisect.bisect_left(t_snap, x_min)
+        y_view = y_s[start_i:] if start_i < len(y_s) else y_s
+        if y_view:
+            y_lo, y_hi = min(y_view), max(y_view)
+            margin = max((y_hi - y_lo) * 0.1, 0.5)
+            dpg.set_axis_limits("y_axis", y_lo - margin, y_hi + margin)
+    else:
+        dpg.set_axis_limits_auto("x_axis")
+        dpg.set_axis_limits_auto("y_axis")
 
     # Limit lines (height mode only)
     plot_mode = dpg.get_value("combo_plot")
@@ -1468,14 +1498,14 @@ def _open_about_dlg():
 # ══════════════════════════════════════════════════════════════════════
 def build_gui():
     """Build the entire DearPyGui interface. Called once from main()."""
-    global _line_color_dpg_ids, _font_ui, _font_medium, _font_large
+    global _line_color_dpg_ids, _font_ui, _font_bold, _font_medium, _font_large
 
     dpg.create_context()
     dpg.create_viewport(title="EN 14055 Cistern Analytics - ifm PI1789",
                         width=1200, height=850)
 
     # ── Fonts ───────────────────────────────────────────────────────
-    _, _, _font_ui, _font_medium, _font_large = setup_fonts()
+    _, _font_bold, _font_ui, _font_medium, _font_large = setup_fonts()
 
     # ── Themes ──────────────────────────────────────────────────────
     create_modern_theme()
@@ -1560,6 +1590,12 @@ def build_gui():
                      "lbl_safety_margin", "lbl_safety_margin_static"):
             dpg.bind_item_font(_tag, _font_medium)
 
+    # Bold font on collapsible section headers
+    _hdr_font = _font_bold or _font_medium
+    if _hdr_font:
+        for _tag in ("hdr_live", "hdr_limits", "hdr_flush", "hdr_log"):
+            if dpg.does_item_exist(_tag):
+                dpg.bind_item_font(_tag, _hdr_font)
     # Mouse handler
     with dpg.handler_registry():
         dpg.add_mouse_click_handler(button=dpg.mvMouseButton_Left, callback=_plot_clicked)
@@ -1570,131 +1606,125 @@ def _build_left_panel():
     _avg = app.app_settings.get("avg_window", 0.5)
 
     with dpg.child_window(width=340, border=False, tag="left_panel"):
-        # Live Data
-        dpg.add_text("  LIVE DATA", color=COL_ACCENT, tag="hdr_live")
-        dpg.add_separator()
-        dpg.add_spacer(height=2)
-        with dpg.group(horizontal=True):
-            with dpg.group():
-                dpg.add_text("0.0 mm",     tag="lbl_h", color=COL_ACCENT)
-                dpg.add_text("0.00 L",     tag="lbl_v", color=COL_GREEN)
-                dpg.add_text("0.0000 bar", tag="lbl_p", color=COL_GRAY)
-            dpg.add_spacer(width=12)
-            with dpg.group():
-                dpg.add_text(_TEMP_PLACEHOLDER, tag="lbl_temp", color=COL_GRAY)
-                dpg.add_text("0.000 L/s",      tag="lbl_f",    color=COL_ORANGE)
-                with dpg.tooltip("lbl_f"):
-                    dpg.add_text("Instantaneous flow rate (live).\n"
-                                 "EN 14055 effective rate (skip first 1 L,\n"
-                                 "last 2 L) is shown in the Flush table.")
+        # Live Data (same style as other headers, but never collapsible)
+        with dpg.collapsing_header(label="LIVE DATA", tag="hdr_live",
+                                    default_open=True, leaf=True):
+            with dpg.group(horizontal=True):
+                with dpg.group():
+                    dpg.add_text("0.0 mm",     tag="lbl_h", color=COL_ACCENT)
+                    dpg.add_text("0.00 L",     tag="lbl_v", color=COL_GREEN)
+                    dpg.add_text("0.0000 bar", tag="lbl_p", color=COL_GRAY)
+                dpg.add_spacer(width=12)
+                with dpg.group():
+                    dpg.add_text(_TEMP_PLACEHOLDER, tag="lbl_temp", color=COL_GRAY)
+                    dpg.add_text("0.000 L/s",      tag="lbl_f",    color=COL_ORANGE)
+                    with dpg.tooltip("lbl_f"):
+                        dpg.add_text("Instantaneous flow rate (live).\n"
+                                     "EN 14055 effective rate (skip first 1 L,\n"
+                                     "last 2 L) is shown in the Flush table.")
+
+        # EN 14055 Limits (collapsible)
+        with dpg.collapsing_header(label="EN 14055 LIMITS", tag="hdr_limits",
+                                    default_open=True):
+
+            with dpg.table(header_row=False, borders_innerV=False,
+                           borders_outerV=False, borders_innerH=False,
+                           borders_outerH=False, pad_outerX=False):
+                dpg.add_table_column()
+                dpg.add_table_column()
+                with dpg.table_row():
+                    dpg.add_button(label=f"Set WL ({_avg}s)",
+                                   tag="btn_mwl", callback=_set_mwl, width=-1)
+                    dpg.bind_item_theme("btn_mwl", "theme_btn_action")
+                    dpg.add_button(label=f"Set Meniscus ({_avg}s)",
+                                   tag="btn_menis", callback=_set_meniscus, width=-1)
+                    dpg.bind_item_theme("btn_menis", "theme_btn_action")
+
+            dpg.add_button(label="Auto-detect MWL/CWL", callback=_arm_cwl_auto, width=-1)
+            dpg.bind_item_theme(dpg.last_item(), "theme_btn_action")
+            dpg.add_button(label="Manual MWL/CWL", tag="btn_manual_mwlcwl",
+                           callback=_manual_mwl_cwl, width=-1)
+            dpg.bind_item_theme("btn_manual_mwlcwl", "theme_btn_action")
+            dpg.add_button(label="Start RWL 2s Timer", tag="btn_manual_rwl",
+                           callback=_manual_rwl, width=-1, show=False)
+            dpg.bind_item_theme("btn_manual_rwl", "theme_btn_action")
+
+            dpg.add_spacer(height=4)
+
+            # Limits grid
+            with dpg.group(horizontal=True):
+                with dpg.group(width=160):
+                    dpg.add_text("WL (fill):", color=COL_GRAY)
+                    dpg.add_text("\u2014", tag="lbl_mwl")
+                    dpg.add_spacer(height=3)
+                    dpg.add_text("MWL (fault):", color=COL_GRAY)
+                    dpg.add_text("\u2014", tag="lbl_mwl_fault")
+                    dpg.add_spacer(height=3)
+                    dpg.add_text("CWL (2s):", color=COL_GRAY)
+                    dpg.add_text("\u2014", tag="lbl_cwl")
+                    dpg.add_spacer(height=3)
+                    dpg.add_text("Residual WL:", color=COL_GRAY)
+                    dpg.add_text("0.0 mm", tag="lbl_residual")
+                    dpg.add_spacer(height=3)
+                    dpg.add_text("Water Disch.:", color=COL_GRAY)
+                    dpg.add_text("0.0 mm", tag="lbl_wd")
+                with dpg.group():
+                    dpg.add_text("Meniscus:", color=COL_GRAY)
+                    dpg.add_text("0.0 mm", tag="lbl_menis")
+                    dpg.add_spacer(height=3)
+                    dpg.add_text("Overflow:", color=COL_GRAY)
+                    dpg.add_text("0.0 mm", tag="lbl_overflow", color=COL_GRAY)
+                    dpg.add_spacer(height=3)
+                    dpg.add_text("Safety margin c:", color=COL_GRAY)
+                    dpg.add_text("\u2014", tag="lbl_safety_margin_static")
+                    dpg.add_spacer(height=3)
+                    dpg.add_text("Live headroom:", color=COL_GRAY)
+                    dpg.add_text("\u2014 mm", tag="lbl_safety_margin")
+
+            dpg.add_spacer(height=6)
+
+            # Status indicators
+            dpg.add_text("CWL: \u2014 (capture during fault test)", tag="lbl_airgap")
+            _bind_status("lbl_airgap", "theme_gray")
+            dpg.add_text("CWL: IDLE \u2014 arm while at MWL", tag="lbl_cwl_auto_st")
+            _bind_status("lbl_cwl_auto_st", "theme_gray")
+            dpg.add_text("RWL: IDLE (set WL to arm)", tag="lbl_cwl_st")
+            _bind_status("lbl_cwl_st", "theme_gray")
 
         dpg.add_spacer(height=8)
 
-        # EN 14055 Limits
-        dpg.add_text("  EN 14055 LIMITS", color=COL_ACCENT, tag="hdr_limits")
-        dpg.add_separator()
-        dpg.add_spacer(height=2)
-
-        with dpg.table(header_row=False, borders_innerV=False,
-                       borders_outerV=False, borders_innerH=False,
-                       borders_outerH=False, pad_outerX=False):
-            dpg.add_table_column()
-            dpg.add_table_column()
-            with dpg.table_row():
-                dpg.add_button(label=f"Set WL ({_avg}s)",
-                               tag="btn_mwl", callback=_set_mwl, width=-1)
-                dpg.bind_item_theme("btn_mwl", "theme_btn_action")
-                dpg.add_button(label=f"Set Meniscus ({_avg}s)",
-                               tag="btn_menis", callback=_set_meniscus, width=-1)
-                dpg.bind_item_theme("btn_menis", "theme_btn_action")
-
-        dpg.add_button(label="Auto-detect MWL/CWL", callback=_arm_cwl_auto, width=-1)
-        dpg.bind_item_theme(dpg.last_item(), "theme_btn_action")
-        dpg.add_button(label="Manual MWL/CWL", tag="btn_manual_mwlcwl",
-                       callback=_manual_mwl_cwl, width=-1)
-        dpg.bind_item_theme("btn_manual_mwlcwl", "theme_btn_action")
-        dpg.add_button(label="Start RWL 2s Timer", tag="btn_manual_rwl",
-                       callback=_manual_rwl, width=-1, show=False)
-        dpg.bind_item_theme("btn_manual_rwl", "theme_btn_action")
-
-        dpg.add_spacer(height=4)
-
-        # Limits grid
-        with dpg.group(horizontal=True):
-            with dpg.group(width=160):
-                dpg.add_text("WL (fill):", color=COL_GRAY)
-                dpg.add_text("\u2014", tag="lbl_mwl")
-                dpg.add_spacer(height=3)
-                dpg.add_text("MWL (fault):", color=COL_GRAY)
-                dpg.add_text("\u2014", tag="lbl_mwl_fault")
-                dpg.add_spacer(height=3)
-                dpg.add_text("CWL (2s):", color=COL_GRAY)
-                dpg.add_text("\u2014", tag="lbl_cwl")
-                dpg.add_spacer(height=3)
-                dpg.add_text("Residual WL:", color=COL_GRAY)
-                dpg.add_text("0.0 mm", tag="lbl_residual")
-                dpg.add_spacer(height=3)
-                dpg.add_text("Water Disch.:", color=COL_GRAY)
-                dpg.add_text("0.0 mm", tag="lbl_wd")
-            with dpg.group():
-                dpg.add_text("Meniscus:", color=COL_GRAY)
-                dpg.add_text("0.0 mm", tag="lbl_menis")
-                dpg.add_spacer(height=3)
-                dpg.add_text("Overflow:", color=COL_GRAY)
-                dpg.add_text("0.0 mm", tag="lbl_overflow", color=COL_GRAY)
-                dpg.add_spacer(height=3)
-                dpg.add_text("Safety margin c:", color=COL_GRAY)
-                dpg.add_text("\u2014", tag="lbl_safety_margin_static")
-                dpg.add_spacer(height=3)
-                dpg.add_text("Live headroom:", color=COL_GRAY)
-                dpg.add_text("\u2014 mm", tag="lbl_safety_margin")
-
-        dpg.add_spacer(height=6)
-
-        # Status indicators
-        dpg.add_text("CWL: \u2014 (capture during fault test)", tag="lbl_airgap")
-        _bind_status("lbl_airgap", "theme_gray")
-        dpg.add_text("CWL: IDLE \u2014 arm while at MWL", tag="lbl_cwl_auto_st")
-        _bind_status("lbl_cwl_auto_st", "theme_gray")
-        dpg.add_text("RWL: IDLE (set WL to arm)", tag="lbl_cwl_st")
-        _bind_status("lbl_cwl_st", "theme_gray")
+        # Flush Test (collapsible)
+        with dpg.collapsing_header(label="FLUSH TEST (EN 14055)", tag="hdr_flush",
+                                    default_open=True):
+            with dpg.group(horizontal=True):
+                dpg.add_text("Type:", color=COL_GRAY)
+                dpg.add_combo(["Full Flush", "Part Flush"],
+                              default_value="Full Flush",
+                              tag="combo_flush_type", width=-1)
+            dpg.add_spacer(height=3)
+            dpg.add_button(label="Start Flush Measurement", tag="btn_flush",
+                           callback=_toggle_flush_measure, width=-1)
+            dpg.bind_item_theme("btn_flush", "theme_btn_success")
+            dpg.add_text("* EN col = rate ignoring first 1L and last 2L",
+                         color=COL_GRAY)
+            dpg.add_spacer(height=3)
+            with dpg.child_window(tag="flush_table_area", height=145,
+                                  border=False, no_scrollbar=True):
+                dpg.add_text("No measurements yet.", color=COL_GRAY)
+            dpg.add_spacer(height=3)
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Clear All", callback=_clear_flush, width=90)
+                dpg.bind_item_theme(dpg.last_item(), "theme_btn_danger")
+                dpg.add_button(label="Compliance Check", callback=_check_compliance, width=-1)
 
         dpg.add_spacer(height=8)
 
-        # Flush Test
-        dpg.add_text("  FLUSH TEST  (EN 14055)", color=COL_ACCENT, tag="hdr_flush")
-        dpg.add_separator()
-        dpg.add_spacer(height=2)
-        with dpg.group(horizontal=True):
-            dpg.add_text("Type:", color=COL_GRAY)
-            dpg.add_combo(["Full Flush", "Part Flush"],
-                          default_value="Full Flush",
-                          tag="combo_flush_type", width=-1)
-        dpg.add_spacer(height=3)
-        dpg.add_button(label="Start Flush Measurement", tag="btn_flush",
-                       callback=_toggle_flush_measure, width=-1)
-        dpg.bind_item_theme("btn_flush", "theme_btn_success")
-        dpg.add_text("* EN col = rate ignoring first 1L and last 2L",
-                     color=COL_GRAY)
-        dpg.add_spacer(height=3)
-        with dpg.child_window(tag="flush_table_area", height=145,
-                              border=False, no_scrollbar=True):
-            dpg.add_text("No measurements yet.", color=COL_GRAY)
-        dpg.add_spacer(height=3)
-        with dpg.group(horizontal=True):
-            dpg.add_button(label="Clear All", callback=_clear_flush, width=90)
-            dpg.bind_item_theme(dpg.last_item(), "theme_btn_danger")
-            dpg.add_button(label="Compliance Check", callback=_check_compliance, width=-1)
-
-        dpg.add_spacer(height=8)
-
-        # Data Log
-        dpg.add_text("  DATA LOG", color=COL_ACCENT, tag="hdr_log")
-        dpg.add_separator()
-        dpg.add_spacer(height=2)
-        dpg.add_button(label="Start Data Log (CSV)", tag="btn_log",
-                       callback=_toggle_log, width=-1)
-        dpg.bind_item_theme("btn_log", "theme_btn_success")
+        # Data Log (collapsible)
+        with dpg.collapsing_header(label="DATA LOG", tag="hdr_log",
+                                    default_open=True):
+            dpg.add_button(label="Start Data Log (CSV)", tag="btn_log",
+                           callback=_toggle_log, width=-1)
+            dpg.bind_item_theme("btn_log", "theme_btn_success")
 
 
 def _build_right_panel():
@@ -1726,7 +1756,7 @@ def _build_right_panel():
                     dpg.add_button(label="Pause", tag="btn_pause",
                                    callback=_toggle_pause, width=78)
                     dpg.add_button(label="Screenshot", callback=_export_screenshot, width=100)
-                    dpg.add_button(label="Colors", callback=_open_line_colors_dlg, width=58)
+                    dpg.add_button(label="Clear Chart", callback=_clear_chart, width=90)
                     dpg.add_spacer(width=8)
                     dpg.add_text("Delta:", color=COL_GRAY)
                     dpg.add_text("---", tag="lbl_delta", color=COL_ACCENT)
