@@ -1,12 +1,39 @@
 use crate::sensor::{SensorCore, SensorEvent};
-use crate::logic::{CisternProfile, CalibrationPoint, FlushResult, run_compliance_checks};
+use crate::logic::{CisternProfile, CalibrationPoint, FlushResult, run_compliance_checks, smooth};
 use eframe::egui;
-use egui::{Color32, RichText};
+use egui::{Color32, RichText, Key, Modifiers};
 use egui_extras::{TableBuilder, Column};
 use egui_plot::{Line, Plot, HLine, Points, VLine};
 use std::fs::File;
 use std::io::Write;
+use std::path::PathBuf;
+use std::time::Instant;
 use chrono::Local;
+use serde::{Serialize, Deserialize};
+
+/// CWL / RWL auto-detection state machine stages.
+#[derive(PartialEq, Clone, Debug)]
+enum AutoState { Idle, Armed, Waiting, Done }
+
+/// Typed settings struct — serialised to/from settings.json.
+#[derive(Serialize, Deserialize, Clone)]
+struct AppSettings {
+    port:          String,
+    baud:          u32,
+    io_port:       u32,
+    polling_ms:    u32,
+    pressure_unit: String,
+    avg_window:    String,
+    cwl_mode:      String,
+    cwl_drop:      String,
+    cwl_smooth:    String,
+    ui_refresh:    String,
+    ch_refresh:    String,
+    temp_offset:   String,
+    chart_window:  String,
+    chart_smooth:  String,
+    dark_mode:     bool,
+}
 
 const BUFFER_MAX: usize = 12000;
 
@@ -54,6 +81,7 @@ pub struct CisternApp {
     target_port: String,
     target_baud: u32,
     target_polling: u32,
+    target_io_port: u32,
     
     // UI Theme
     is_dark_mode: bool,
@@ -120,6 +148,37 @@ pub struct CisternApp {
     current_v: f64,
     current_f: f64,
     current_temp: Option<f64>,
+    sensor_status_text: String,
+
+    // CWL / RWL auto-detection state
+    cwl_state: AutoState,
+    cwl_peak: f64,
+    cwl_timer: Option<Instant>,
+    rwl_state: AutoState,
+    rwl_timer: Option<Instant>,
+
+    // Rolling height history for smoothing during CWL/RWL detection (last N samples)
+    h_history: Vec<f64>,
+
+    // Toast notification
+    toast_msg: String,
+    toast_until: Option<Instant>,
+
+    // Paths for profile persistence
+    config_dir: PathBuf,
+
+    // Unsaved changes tracking
+    profile_dirty: bool,
+
+    // Undo stack for calibration edits
+    cal_undo_stack: Vec<CisternProfile>,
+
+    // Auto-reconnect
+    auto_reconnect: bool,
+    reconnect_after: Option<Instant>,
+
+    // Cal validation message
+    cal_validation_msg: String,
 }
 
 impl CisternApp {
@@ -130,9 +189,10 @@ impl CisternApp {
         Self {
             sensor: SensorCore::new(),
             profile: prof,
-            target_port: "COM8".to_string(), 
+            target_port: "COM8".to_string(),
             target_baud: 115200,
             target_polling: 50,
+            target_io_port: 1,
             is_dark_mode: true, // Defaulting to Dark
             theme_applied: false,
             show_calibration_modal: false,
@@ -147,7 +207,7 @@ impl CisternApp {
             color_cwl: Color32::from_rgb(250, 179, 135),
             color_mwl: Color32::from_rgb(166, 227, 161),
             color_menis: Color32::from_rgb(180, 130, 255),
-            color_wd: Color32::from_rgb(137, 180, 250),
+            color_wd: Color32::from_rgb(243, 139, 168),
             color_of: Color32::from_rgb(243, 139, 168),
             setting_pressure_unit: "bar".to_string(),
             setting_avg_window: "0.5".to_string(),
@@ -177,6 +237,26 @@ impl CisternApp {
             flush_start_time: 0.0,
             compliance_results: Vec::new(),
             current_p: 0.0, current_h: 0.0, current_v: 0.0, current_f: 0.0, current_temp: None,
+            sensor_status_text: "--".to_string(),
+            cwl_state: AutoState::Idle,
+            cwl_peak: 0.0,
+            cwl_timer: None,
+            rwl_state: AutoState::Idle,
+            rwl_timer: None,
+            h_history: Vec::new(),
+            toast_msg: String::new(),
+            toast_until: None,
+            config_dir: {
+                std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.parent().map(|d| d.join("config")))
+                    .unwrap_or_else(|| PathBuf::from("config"))
+            },
+            profile_dirty: false,
+            cal_undo_stack: Vec::new(),
+            auto_reconnect: true,
+            reconnect_after: None,
+            cal_validation_msg: String::new(),
         }
     }
 
@@ -190,6 +270,186 @@ impl CisternApp {
     fn col_bg_btn(&self) -> Color32 { if self.is_dark_mode { Color32::from_rgb(55, 55, 85) }    else { Color32::from_rgb(180, 185, 205) } }
     fn col_btn_success(&self) -> Color32 { if self.is_dark_mode { Color32::from_rgb(35, 90, 55) } else { Color32::from_rgb(45, 145, 75) } }
     fn col_btn_danger(&self)  -> Color32 { if self.is_dark_mode { Color32::from_rgb(100, 40, 50) } else { Color32::from_rgb(175, 45, 60) } }
+
+    // ── Toast helpers ────────────────────────────────────────────────────
+    fn show_toast(&mut self, msg: &str) {
+        self.toast_msg = msg.to_string();
+        self.toast_until = Some(Instant::now() + std::time::Duration::from_secs(3));
+    }
+
+    fn toast_active(&self) -> bool {
+        self.toast_until.map_or(false, |t| Instant::now() < t)
+    }
+
+    // ── Averaging window helper (mirrors Python get_avg_height) ──────────
+    fn get_avg_height(&self) -> f64 {
+        let window_s: f64 = self.setting_avg_window.parse().unwrap_or(0.5);
+        let pts = self.h_buf.get_line_points();
+        if pts.is_empty() { return self.current_h; }
+        let now = pts.last().map(|p| p[0]).unwrap_or(0.0);
+        let vals: Vec<f64> = pts.iter()
+            .rev()
+            .take_while(|p| now - p[0] <= window_s)
+            .map(|p| p[1])
+            .collect();
+        if vals.is_empty() { self.current_h } else { vals.iter().sum::<f64>() / vals.len() as f64 }
+    }
+
+    // ── Profile persistence helpers ──────────────────────────────────────
+    fn profile_path(&self, name: &str) -> PathBuf {
+        self.config_dir.join(name)
+    }
+
+    fn save_profile_to(&mut self, path: &PathBuf) {
+        if let Ok(json) = serde_json::to_string_pretty(&self.profile) {
+            let _ = std::fs::create_dir_all(&self.config_dir);
+            if std::fs::write(path, json).is_ok() {
+                self.profile_dirty = false;
+            }
+        }
+    }
+
+    fn load_profile_from(&mut self, path: &PathBuf) {
+        if let Ok(data) = std::fs::read_to_string(path) {
+            if let Ok(prof) = serde_json::from_str::<CisternProfile>(&data) {
+                self.profile = prof;
+                self.profile.sort_points();
+                self.sensor.update_profile(self.profile.clone());
+                self.profile_dirty = false;
+            }
+        }
+    }
+
+    /// Open a native Save-file dialog and save the current profile.
+    fn save_profile_dialog(&mut self) {
+        let default = self.config_dir.clone();
+        if let Some(path) = rfd::FileDialog::new()
+            .set_title("Save Profile")
+            .set_directory(&default)
+            .add_filter("JSON profile", &["json"])
+            .set_file_name(&format!("{}.json", self.profile.name))
+            .save_file()
+        {
+            self.save_profile_to(&path);
+            self.show_toast("Profile saved.");
+        }
+    }
+
+    /// Open a native Open-file dialog and load a profile.
+    fn load_profile_dialog(&mut self) {
+        let default = self.config_dir.clone();
+        if let Some(path) = rfd::FileDialog::new()
+            .set_title("Load Profile")
+            .set_directory(&default)
+            .add_filter("JSON profile", &["json"])
+            .pick_file()
+        {
+            self.load_profile_from(&path);
+            self.show_toast("Profile loaded.");
+        }
+    }
+
+    /// Import calibration points from a CSV file (columns: P,H,V).
+    fn import_cal_csv_dialog(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .set_title("Import Calibration CSV")
+            .add_filter("CSV", &["csv"])
+            .pick_file()
+        {
+            match std::fs::read_to_string(&path) {
+                Ok(data) => {
+                    let mut imported = 0usize;
+                    for line in data.lines().skip(1) { // skip header
+                        let cols: Vec<&str> = line.split(',').collect();
+                        if cols.len() >= 3 {
+                            if let (Ok(p), Ok(h), Ok(v)) = (
+                                cols[0].trim().parse::<f64>(),
+                                cols[1].trim().parse::<f64>(),
+                                cols[2].trim().parse::<f64>(),
+                            ) {
+                                if p >= 0.0 && h >= 0.0 && v >= 0.0 {
+                                    self.profile.points.retain(|pt| (pt.p - p).abs() > 1e-6);
+                                    self.profile.points.push(CalibrationPoint { p, h, v });
+                                    imported += 1;
+                                }
+                            }
+                        }
+                    }
+                    self.profile.sort_points();
+                    self.sensor.update_profile(self.profile.clone());
+                    self.profile_dirty = true;
+                    self.show_toast(&format!("Imported {} calibration points.", imported));
+                }
+                Err(e) => self.show_toast(&format!("CSV read error: {}", e)),
+            }
+        }
+    }
+
+    fn save_settings(&self) {
+        let settings = AppSettings {
+            port:          self.target_port.clone(),
+            baud:          self.target_baud,
+            io_port:       self.target_io_port,
+            polling_ms:    self.target_polling,
+            pressure_unit: self.setting_pressure_unit.clone(),
+            avg_window:    self.setting_avg_window.clone(),
+            cwl_mode:      self.setting_cwl_mode.clone(),
+            cwl_drop:      self.setting_cwl_drop.clone(),
+            cwl_smooth:    self.setting_cwl_smooth.clone(),
+            ui_refresh:    self.setting_ui_refresh.clone(),
+            ch_refresh:    self.setting_ch_refresh.clone(),
+            temp_offset:   self.setting_temp_offset.clone(),
+            chart_window:  self.chart_window_val.clone(),
+            chart_smooth:  self.chart_smooth_val.clone(),
+            dark_mode:     self.is_dark_mode,
+        };
+        let _ = std::fs::create_dir_all(&self.config_dir);
+        let path = self.config_dir.join("settings.json");
+        if let Ok(json) = serde_json::to_string_pretty(&settings) {
+            let _ = std::fs::write(path, json);
+        }
+    }
+
+    fn load_settings(&mut self) {
+        let path = self.config_dir.join("settings.json");
+        if let Ok(data) = std::fs::read_to_string(&path) {
+            if let Ok(s) = serde_json::from_str::<AppSettings>(&data) {
+                self.target_port           = s.port;
+                self.target_baud           = s.baud;
+                self.target_io_port        = s.io_port;
+                self.target_polling        = s.polling_ms;
+                self.setting_pressure_unit = s.pressure_unit;
+                self.setting_avg_window    = s.avg_window;
+                self.setting_cwl_mode      = s.cwl_mode;
+                self.setting_cwl_drop      = s.cwl_drop;
+                self.setting_cwl_smooth    = s.cwl_smooth;
+                self.setting_ui_refresh    = s.ui_refresh;
+                self.setting_ch_refresh    = s.ch_refresh;
+                self.setting_temp_offset   = s.temp_offset;
+                self.chart_window_val      = s.chart_window;
+                self.chart_smooth_val      = s.chart_smooth;
+                self.is_dark_mode          = s.dark_mode;
+                self.theme_applied         = false;
+            }
+        }
+        // Push loaded temp offset to sensor thread
+        if let Ok(off) = self.setting_temp_offset.parse::<f64>() {
+            self.sensor.set_temp_offset(off);
+        }
+        // Also load default profile if present
+        let default_path = self.profile_path("default_profile.json");
+        if default_path.exists() {
+            self.load_profile_from(&default_path);
+        }
+    }
+
+    /// Decode PI1789 status byte (active-LOW bits) into a short string.
+    fn decode_status_text(status: u8) -> String {
+        if status & 0x80 == 0 { return "FAULT".to_string(); }
+        if status & 0x40 == 0 { return "Over-range".to_string(); }
+        if status & 0x20 == 0 { return "Under-range".to_string(); }
+        "OK".to_string()
+    }
 
     fn apply_theme(&self, ctx: &egui::Context) {
         let mut vis = if self.is_dark_mode { egui::Visuals::dark() } else { egui::Visuals::light() };
@@ -226,7 +486,7 @@ impl CisternApp {
         } else {
             let fname = format!("EN14055_Record_{}.csv", Local::now().format("%Y%m%d_%H%M%S"));
             if let Ok(mut f) = File::create(&fname) {
-                let _ = writeln!(f, "Time(s),P(bar),H(mm),V(L)");
+                let _ = writeln!(f, "Time(s),P(bar),H(mm),V(L),Flow(L/s),Temp(C)");
                 self.csv_file = Some(f);
                 self.is_logging = true;
             }
@@ -238,41 +498,76 @@ impl CisternApp {
         egui::Window::new("Edit Calibration Profile").open(&mut is_open).collapsible(false).show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Profile Name:");
-                ui.text_edit_singleline(&mut self.profile.name);
-            });
-            ui.add_space(8.0);
-            
-            ui.horizontal(|ui| {
-                ui.label("Overflow (OF):");
-                ui.add(egui::DragValue::new(&mut self.profile.overflow).speed(0.1));
-                ui.label("Water Discharge (WD):");
-                ui.add(egui::DragValue::new(&mut self.profile.water_discharge).speed(0.1));
+                if ui.text_edit_singleline(&mut self.profile.name).changed() {
+                    self.profile_dirty = true;
+                }
             });
             ui.add_space(8.0);
 
-            ui.heading("Points Mapping");
+            ui.horizontal(|ui| {
+                ui.label("Overflow (OF):");
+                if ui.add(egui::DragValue::new(&mut self.profile.overflow).speed(0.1)).changed() {
+                    self.profile_dirty = true;
+                }
+                ui.label("Water Discharge (WD):");
+                if ui.add(egui::DragValue::new(&mut self.profile.water_discharge).speed(0.1)).changed() {
+                    self.profile_dirty = true;
+                }
+            });
+            ui.add_space(8.0);
+
+            ui.horizontal(|ui| {
+                ui.heading("Points Mapping");
+                ui.add_space(8.0);
+                if !self.cal_undo_stack.is_empty() {
+                    if ui.button("↩ Undo").clicked() {
+                        if let Some(prev) = self.cal_undo_stack.pop() {
+                            self.profile = prev;
+                            self.sensor.update_profile(self.profile.clone());
+                            self.profile_dirty = true;
+                        }
+                    }
+                }
+                if ui.button("📂 Import CSV").clicked() {
+                    self.import_cal_csv_dialog();
+                }
+            });
+
             TableBuilder::new(ui)
                 .striped(true).cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                .column(Column::initial(80.0)).column(Column::initial(80.0)).column(Column::initial(80.0)).column(Column::remainder())
+                .column(Column::initial(80.0)).column(Column::initial(80.0))
+                .column(Column::initial(80.0)).column(Column::remainder())
                 .header(24.0, |mut header| {
-                    header.col(|ui| { ui.strong("P (bar)"); }); header.col(|ui| { ui.strong("H (mm)"); });
-                    header.col(|ui| { ui.strong("V (L)"); }); header.col(|ui| { ui.strong("Del"); });
+                    header.col(|ui| { ui.strong("P (bar)"); });
+                    header.col(|ui| { ui.strong("H (mm)"); });
+                    header.col(|ui| { ui.strong("V (L)"); });
+                    header.col(|ui| { ui.strong("Del"); });
                 })
                 .body(|mut body| {
                     let mut to_remove = None;
                     for (i, pt) in self.profile.points.iter().enumerate() {
                         body.row(24.0, |mut row| {
-                            row.col(|ui| { ui.label(format!("{:.4}", pt.p)); }); row.col(|ui| { ui.label(format!("{:.1}", pt.h)); });
+                            row.col(|ui| { ui.label(format!("{:.4}", pt.p)); });
+                            row.col(|ui| { ui.label(format!("{:.1}", pt.h)); });
                             row.col(|ui| { ui.label(format!("{:.2}", pt.v)); });
                             row.col(|ui| { if ui.button("X").clicked() { to_remove = Some(i); } });
                         });
                     }
                     if let Some(idx) = to_remove {
+                        // Push undo snapshot before removing
+                        self.cal_undo_stack.push(self.profile.clone());
+                        if self.cal_undo_stack.len() > 20 { self.cal_undo_stack.remove(0); }
                         self.profile.points.remove(idx);
                         self.profile.sort_points();
                         self.sensor.update_profile(self.profile.clone());
+                        self.profile_dirty = true;
                     }
                 });
+
+            // Validation message
+            if !self.cal_validation_msg.is_empty() {
+                ui.colored_label(self.col_red(), &self.cal_validation_msg.clone());
+            }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.label("P(bar):"); ui.add(egui::TextEdit::singleline(&mut self.cal_p_in).desired_width(50.0));
@@ -280,16 +575,45 @@ impl CisternApp {
                 ui.label("H(mm):"); ui.add(egui::TextEdit::singleline(&mut self.cal_h_in).desired_width(50.0));
                 ui.label("V(L):"); ui.add(egui::TextEdit::singleline(&mut self.cal_v_in).desired_width(50.0));
                 if ui.button("+ Add").clicked() {
-                    if let (Ok(p), Ok(h), Ok(v)) = (self.cal_p_in.parse::<f64>(), self.cal_h_in.parse::<f64>(), self.cal_v_in.parse::<f64>()) {
-                        self.profile.points.retain(|pt| (pt.p - p).abs() > 1e-6);
-                        self.profile.points.push(CalibrationPoint { p, h, v });
-                        self.profile.sort_points();
-                        self.sensor.update_profile(self.profile.clone());
+                    self.cal_validation_msg.clear();
+                    match (self.cal_p_in.parse::<f64>(), self.cal_h_in.parse::<f64>(), self.cal_v_in.parse::<f64>()) {
+                        (Ok(p), Ok(h), Ok(v)) => {
+                            if p < 0.0 { self.cal_validation_msg = "P must be ≥ 0".to_string(); }
+                            else if h < 0.0 { self.cal_validation_msg = "H must be ≥ 0".to_string(); }
+                            else if v < 0.0 { self.cal_validation_msg = "V must be ≥ 0".to_string(); }
+                            else {
+                                // Check monotonicity: H should increase with P
+                                let sorted = {
+                                    let mut tmp = self.profile.points.clone();
+                                    tmp.retain(|pt| (pt.p - p).abs() > 1e-6);
+                                    tmp.push(CalibrationPoint { p, h, v });
+                                    tmp.sort_by(|a, b| a.p.partial_cmp(&b.p).unwrap());
+                                    tmp
+                                };
+                                let monotone = sorted.windows(2).all(|w| w[1].h >= w[0].h);
+                                if !monotone {
+                                    self.cal_validation_msg = "⚠ H is not monotonically increasing with P".to_string();
+                                }
+                                // Add even if warning (user may override)
+                                self.cal_undo_stack.push(self.profile.clone());
+                                if self.cal_undo_stack.len() > 20 { self.cal_undo_stack.remove(0); }
+                                self.profile.points.retain(|pt| (pt.p - p).abs() > 1e-6);
+                                self.profile.points.push(CalibrationPoint { p, h, v });
+                                self.profile.sort_points();
+                                self.sensor.update_profile(self.profile.clone());
+                                self.profile_dirty = true;
+                                self.cal_p_in.clear(); self.cal_h_in.clear(); self.cal_v_in.clear();
+                            }
+                        }
+                        _ => { self.cal_validation_msg = "Invalid number format".to_string(); }
                     }
                 }
             });
             ui.add_space(10.0);
-            if ui.button("Close").clicked() { self.show_calibration_modal = false; }
+            if ui.button("Close").clicked() {
+                self.cal_validation_msg.clear();
+                self.show_calibration_modal = false;
+            }
         });
         self.show_calibration_modal = is_open;
     }
@@ -314,6 +638,14 @@ impl CisternApp {
                 egui::ComboBox::from_id_source("conn_baud").selected_text(self.target_baud.to_string()).show_ui(ui, |ui| {
                     for &b in &[9600, 19200, 38400, 57600, 115200, 230400, 460800] {
                         ui.selectable_value(&mut self.target_baud, b, b.to_string());
+                    }
+                });
+                ui.end_row();
+
+                ui.label("IO-Link Port:");
+                egui::ComboBox::from_id_source("conn_ioport").selected_text(format!("Port {}", self.target_io_port)).show_ui(ui, |ui| {
+                    for p in 1u32..=8 {
+                        ui.selectable_value(&mut self.target_io_port, p, format!("Port {}", p));
                     }
                 });
                 ui.end_row();
@@ -442,9 +774,35 @@ impl CisternApp {
             });
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.button("Save").clicked() { self.show_program_modal = false; }
-                if ui.button("Cancel").clicked() { self.show_program_modal = false; }
-                if ui.button("Reset to Defaults").clicked() { self.show_program_modal = false; }
+                if ui.button("Save").clicked() {
+                    self.save_settings();
+                    // Apply temp offset immediately to running sensor thread
+                    if let Ok(off) = self.setting_temp_offset.parse::<f64>() {
+                        self.sensor.set_temp_offset(off);
+                    }
+                    self.show_program_modal = false;
+                }
+                if ui.button("Cancel").clicked() {
+                    // Reload saved settings to discard in-dialog changes
+                    self.load_settings();
+                    self.show_program_modal = false;
+                }
+                if ui.button("Reset to Defaults").clicked() {
+                    self.setting_pressure_unit = "bar".to_string();
+                    self.setting_avg_window    = "0.5".to_string();
+                    self.setting_cwl_mode      = "Automatic".to_string();
+                    self.setting_cwl_drop      = "1.5".to_string();
+                    self.setting_cwl_smooth    = "SMA-5".to_string();
+                    self.setting_ui_refresh    = "50".to_string();
+                    self.setting_ch_refresh    = "100".to_string();
+                    self.setting_temp_offset   = "0.0".to_string();
+                    self.chart_window_val      = "30s".to_string();
+                    self.chart_smooth_val      = "None".to_string();
+                    self.is_dark_mode          = true;
+                    self.theme_applied         = false;
+                    self.save_settings();
+                    self.show_program_modal = false;
+                }
             });
         });
         self.show_program_modal = is_open;
@@ -454,22 +812,90 @@ impl CisternApp {
 impl eframe::App for CisternApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
 
-        // Theme Switch Logic
+        // Load settings + default profile once on first frame
         if !self.theme_applied {
+            self.load_settings();
             self.apply_theme(ctx);
             self.theme_applied = true;
+        }
+
+        // ---- KEYBOARD SHORTCUTS ----
+        ctx.input_mut(|i| {
+            // F5 — toggle connect/disconnect
+            if i.key_pressed(Key::F5) {
+                if self.sensor.is_connected {
+                    self.sensor.disconnect();
+                    self.reconnect_after = None;
+                } else {
+                    self.sensor.connect(
+                        self.target_port.clone(), self.target_baud,
+                        self.target_io_port, self.target_polling,
+                    );
+                }
+            }
+            // Space — pause/resume chart
+            if i.key_pressed(Key::Space) && !i.modifiers.any() {
+                self.chart_paused = !self.chart_paused;
+            }
+            // Ctrl+S — save profile
+            if i.key_pressed(Key::S) && i.modifiers.matches_logically(Modifiers::CTRL) {
+                self.save_profile_dialog();
+            }
+            // Ctrl+O — load profile
+            if i.key_pressed(Key::O) && i.modifiers.matches_logically(Modifiers::CTRL) {
+                self.load_profile_dialog();
+            }
+            // Ctrl+Z — undo last calibration change
+            if i.key_pressed(Key::Z) && i.modifiers.matches_logically(Modifiers::CTRL) {
+                if let Some(prev) = self.cal_undo_stack.pop() {
+                    self.profile = prev;
+                    self.sensor.update_profile(self.profile.clone());
+                }
+            }
+        });
+
+        // ---- AUTO-RECONNECT ----
+        if let Some(when) = self.reconnect_after {
+            if Instant::now() >= when && !self.sensor.is_connected {
+                self.reconnect_after = None;
+                self.sensor.connect(
+                    self.target_port.clone(), self.target_baud,
+                    self.target_io_port, self.target_polling,
+                );
+            }
         }
 
         // ---- DATA PARSING ----
         for evt in self.sensor.poll_events() {
             match evt {
-                SensorEvent::Connected => self.sensor.update_profile(self.profile.clone()),
-                SensorEvent::Disconnected => {},
-                SensorEvent::Error(err) => { eprintln!("Sensor Error: {}", err); },
-                SensorEvent::Data(pt) => { 
-                    self.current_p = pt.pressure_bar; self.current_h = pt.height_mm; self.current_v = pt.volume_l; self.current_temp = pt.temp_c;
+                SensorEvent::Connected => {
+                    self.sensor.update_profile(self.profile.clone());
+                    // Push current temp offset on (re)connect
+                    if let Ok(off) = self.setting_temp_offset.parse::<f64>() {
+                        self.sensor.set_temp_offset(off);
+                    }
+                }
+                SensorEvent::Disconnected => { self.sensor_status_text = "--".to_string(); },
+                SensorEvent::Error(err) => {
+                    eprintln!("Sensor Error: {}", err);
+                    // Schedule auto-reconnect in 3 seconds if enabled
+                    if self.auto_reconnect && self.reconnect_after.is_none() {
+                        self.reconnect_after = Some(Instant::now() + std::time::Duration::from_secs(3));
+                        self.show_toast("Connection lost — reconnecting in 3 s…");
+                    }
+                },
+                SensorEvent::Data(pt) => {
+                    self.current_p = pt.pressure_bar;
+                    self.current_h = pt.height_mm;
+                    self.current_v = pt.volume_l;
+                    self.current_temp = pt.temp_c;
+
+                    // Decode status byte for status bar display
+                    self.sensor_status_text = Self::decode_status_text(pt.status_byte);
+
+                    // Flow rate from last volume sample
                     let last_v = self.v_buf.last_y().unwrap_or(0.0);
-                    let l_t = self.v_buf.last_x().unwrap_or(pt.time_s - 0.05); // naive diff
+                    let l_t = self.v_buf.last_x().unwrap_or(pt.time_s - 0.05);
                     let dt = if pt.time_s - l_t > 0.001 { pt.time_s - l_t } else { 0.05 };
                     self.current_f = (pt.volume_l - last_v) / dt;
 
@@ -477,10 +903,56 @@ impl eframe::App for CisternApp {
                     self.h_buf.push([pt.time_s, pt.height_mm]);
                     self.v_buf.push([pt.time_s, pt.volume_l]);
                     self.f_buf.push([pt.time_s, self.current_f]);
-                    
+
+                    // Keep rolling height history for CWL/RWL smoothing (last 200 samples)
+                    self.h_history.push(pt.height_mm);
+                    if self.h_history.len() > 200 { self.h_history.remove(0); }
+
+                    // ── CWL auto-detect state machine ──────────────────
+                    if self.cwl_state == AutoState::Armed {
+                        if pt.height_mm > self.cwl_peak { self.cwl_peak = pt.height_mm; }
+                        let alg = self.setting_cwl_smooth.clone();
+                        let sm = smooth(&self.h_history, &alg);
+                        let smoothed = sm.last().copied().unwrap_or(pt.height_mm);
+                        let drop_thresh: f64 = self.setting_cwl_drop.parse().unwrap_or(1.5);
+                        if self.cwl_peak - smoothed >= drop_thresh {
+                            self.cwl_state = AutoState::Waiting;
+                            self.cwl_timer = Some(Instant::now());
+                        }
+                    } else if self.cwl_state == AutoState::Waiting {
+                        if self.cwl_timer.map_or(false, |t| t.elapsed().as_secs_f64() >= 2.0) {
+                            self.profile.cwl = self.get_avg_height();
+                            self.profile.mwl_fault = self.cwl_peak;
+                            self.cwl_state = AutoState::Done;
+                            self.show_toast("CWL & MWL fault captured automatically.");
+                        }
+                    }
+
+                    // ── RWL auto-detect state machine ──────────────────
+                    if self.rwl_state == AutoState::Armed {
+                        // Wait for water level to drop then start 2s timer
+                        let alg = self.setting_cwl_smooth.clone();
+                        let sm = smooth(&self.h_history, &alg);
+                        let smoothed = sm.last().copied().unwrap_or(pt.height_mm);
+                        let drop_thresh: f64 = self.setting_cwl_drop.parse().unwrap_or(1.5);
+                        if self.cwl_peak - smoothed >= drop_thresh {
+                            self.rwl_state = AutoState::Waiting;
+                            self.rwl_timer = Some(Instant::now());
+                        }
+                    } else if self.rwl_state == AutoState::Waiting {
+                        if self.rwl_timer.map_or(false, |t| t.elapsed().as_secs_f64() >= 2.0) {
+                            self.profile.residual_wl = self.get_avg_height();
+                            self.rwl_state = AutoState::Done;
+                            self.show_toast("Residual WL captured.");
+                        }
+                    }
+
                     if self.is_logging {
                         if let Some(f) = &mut self.csv_file {
-                            let _ = writeln!(f, "{:.3},{:.5},{:.1},{:.2}", pt.time_s, pt.pressure_bar, pt.height_mm, pt.volume_l);
+                            let temp_str = pt.temp_c.map_or(String::new(), |t| format!("{:.1}", t));
+                            let _ = writeln!(f, "{:.3},{:.5},{:.1},{:.2},{:.3},{}",
+                                pt.time_s, pt.pressure_bar, pt.height_mm, pt.volume_l,
+                                self.current_f, temp_str);
                         }
                     }
                 }
@@ -496,9 +968,29 @@ impl eframe::App for CisternApp {
         self.draw_about_modal(ctx);
         
         let mut sc = self.show_compliance_modal;
-        egui::Window::new("Compliance Report").open(&mut sc).show(ctx, |ui| {
-            for r in &self.compliance_results { ui.label(r); }
-            if ui.button("Close").clicked() { self.show_compliance_modal = false; }
+        egui::Window::new("Compliance Report").open(&mut sc).min_width(420.0).show(ctx, |ui| {
+            for r in &self.compliance_results {
+                let col = if r.starts_with("[PASS]")   { self.col_green()  }
+                     else if r.starts_with("[FAIL]")   { self.col_red()    }
+                     else if r.starts_with("[WARN]")   { self.col_orange() }
+                     else if r.starts_with("[INFO]")   { self.col_accent() }
+                     else                              { self.col_gray()   };
+                ui.label(RichText::new(r).color(col));
+            }
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.button("Close").clicked() { self.show_compliance_modal = false; }
+                if ui.button("Export TXT").clicked() {
+                    let fname = format!("compliance_{}.txt", Local::now().format("%Y%m%d_%H%M%S"));
+                    if let Ok(mut f) = File::create(&fname) {
+                        let _ = writeln!(f, "EN 14055 Compliance Report — {}", Local::now().format("%Y-%m-%d %H:%M:%S"));
+                        let _ = writeln!(f, "Profile: {}", self.profile.name);
+                        let _ = writeln!(f, "{}", "─".repeat(60));
+                        for r in &self.compliance_results { let _ = writeln!(f, "{}", r); }
+                    }
+                    self.show_toast(&format!("Report exported: {}", fname));
+                }
+            });
         });
         self.show_compliance_modal = sc;
 
@@ -506,13 +998,32 @@ impl eframe::App for CisternApp {
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
-                    let _ = ui.button("Load Profile..."); 
-                    let _ = ui.button("Save Profile As..."); 
+                    if ui.button("Load Profile…").clicked() {
+                        self.load_profile_dialog();
+                        ui.close_menu();
+                    }
+                    if ui.button("Save Profile As…").clicked() {
+                        self.save_profile_dialog();
+                        ui.close_menu();
+                    }
                     ui.separator();
-                    let _ = ui.button("Set as Default Profile");
-                    let _ = ui.button("Clear Default Profile");
+                    if ui.button("Set as Default Profile").clicked() {
+                        let path = self.profile_path("default_profile.json");
+                        self.save_profile_to(&path);
+                        self.show_toast("Default profile set.");
+                        ui.close_menu();
+                    }
+                    if ui.button("Clear Default Profile").clicked() {
+                        let path = self.profile_path("default_profile.json");
+                        let _ = std::fs::remove_file(&path);
+                        self.show_toast("Default profile cleared.");
+                        ui.close_menu();
+                    }
                     ui.separator();
-                    if ui.button("Exit").clicked() { ctx.send_viewport_cmd(egui::ViewportCommand::Close); }
+                    if ui.button("Exit").clicked() {
+                        self.save_settings();
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
                 });
                 ui.menu_button("Settings", |ui| {
                     if ui.button("Hardware Connection...").clicked() { self.show_connection_modal = true; ui.close_menu(); }
@@ -539,18 +1050,36 @@ impl eframe::App for CisternApp {
         egui::TopBottomPanel::top("status_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("<<").clicked() { self.left_panel_visible = !self.left_panel_visible; }
-                ui.label(RichText::new(format!("Active Profile: {}", self.profile.name)).strong());
+                let dirty_marker = if self.profile_dirty { "*" } else { "" };
+                ui.label(RichText::new(format!("Active Profile: {}{}", self.profile.name, dirty_marker)).strong());
                 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if !self.sensor.is_connected {
-                        if ui.button("Connect Sensor").clicked() { self.sensor.connect(self.target_port.clone(), self.target_baud); }
+                        if ui.button("Connect Sensor").clicked() {
+                            self.sensor.connect(
+                                self.target_port.clone(),
+                                self.target_baud,
+                                self.target_io_port,
+                                self.target_polling,
+                            );
+                        }
                         ui.label(RichText::new("Disconnected").color(self.col_gray()));
                     } else {
                         let btn = egui::Button::new(RichText::new("Disconnect").color(Color32::WHITE)).fill(self.col_btn_danger());
                         if ui.add(btn).clicked() { self.sensor.disconnect(); }
-                        ui.label(RichText::new(format!("{} {}", self.target_port, self.target_baud)).color(self.col_green()));
+                        ui.label(RichText::new(
+                            format!("{} {} Port {}", self.target_port, self.target_baud, self.target_io_port)
+                        ).color(self.col_green()));
                     }
-                    if self.sensor.is_connected { ui.label("●").on_hover_text("Status OK"); } else { ui.label("--"); }
+                    // Sensor status indicator
+                    let (status_icon, status_col) = if self.sensor.is_connected {
+                        let ok = self.sensor_status_text == "OK";
+                        ("●", if ok { self.col_green() } else { self.col_red() })
+                    } else {
+                        ("●", self.col_gray())
+                    };
+                    ui.label(RichText::new(status_icon).color(status_col))
+                        .on_hover_text(self.sensor_status_text.clone());
                 });
             });
         });
@@ -583,36 +1112,161 @@ impl eframe::App for CisternApp {
                     // 2. EN 14055 LIMITS
                     egui::CollapsingHeader::new(RichText::new("EN 14055 LIMITS").strong()).default_open(true).show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            let b1 = egui::Button::new(RichText::new("Set WL  (avg 0.5s)").color(self.col_text())).fill(self.col_bg_btn());
-                            if ui.add_sized([150.0, 24.0], b1).clicked() { self.profile.mwl = self.current_h; }
-                            
-                            let b2 = egui::Button::new(RichText::new("Set Meniscus (avg 0.5s)").color(self.col_text())).fill(self.col_bg_btn());
-                            if ui.add_sized([150.0, 24.0], b2).clicked() { self.profile.meniscus = self.current_h - self.profile.overflow; }
+                            let avg_lbl = format!("Set WL (avg {}s)", self.setting_avg_window);
+                            let b1 = egui::Button::new(RichText::new(&avg_lbl).color(self.col_text())).fill(self.col_bg_btn());
+                            if ui.add_sized([150.0, 24.0], b1).clicked() {
+                                let avg = self.get_avg_height();
+                                self.profile.mwl = avg;
+                                self.cwl_state = AutoState::Armed;
+                                self.cwl_peak  = avg;
+                                self.cwl_timer = None;
+                                self.rwl_state = AutoState::Armed;
+                                self.rwl_timer = None;
+                                self.profile_dirty = true;
+                            }
+
+                            let b2 = egui::Button::new(RichText::new("Set Meniscus").color(self.col_text())).fill(self.col_bg_btn());
+                            if ui.add_sized([150.0, 24.0], b2).clicked() {
+                                if self.profile.overflow > 0.0 {
+                                    self.profile.meniscus = self.get_avg_height() - self.profile.overflow;
+                                } else {
+                                    self.show_toast("⚠ Set Overflow level in Calibration first!");
+                                }
+                            }
                         });
-                        let bb1 = egui::Button::new(RichText::new("Auto-detect MWL/CWL").color(self.col_text())).fill(self.col_bg_btn());
-                        let _ = ui.add_sized([ui.available_width(), 24.0], bb1);
-                        let bb2 = egui::Button::new(RichText::new("Manual MWL/CWL").color(self.col_text())).fill(self.col_bg_btn());
-                        let _ = ui.add_sized([ui.available_width(), 24.0], bb2);
-                        
+
+                        // Set Overflow and Water Discharge from live reading
+                        ui.horizontal(|ui| {
+                            let b_of = egui::Button::new(RichText::new("Set Overflow (OF)").color(self.col_text())).fill(self.col_bg_btn());
+                            if ui.add_sized([150.0, 24.0], b_of).on_hover_text("Capture current height as Overflow level (OF). §5.2.6").clicked() {
+                                self.profile.overflow = self.get_avg_height();
+                                self.profile_dirty = true;
+                                self.show_toast(format!("Overflow set to {:.1} mm", self.profile.overflow).as_str());
+                            }
+                            let b_wd = egui::Button::new(RichText::new("Set Water Discharge (WD)").color(self.col_text())).fill(self.col_bg_btn());
+                            if ui.add_sized([150.0, 24.0], b_wd).on_hover_text("Capture current height as Water Discharge inlet level (WD). §5.2.7 air gap = WD − CWL ≥ 20 mm").clicked() {
+                                self.profile.water_discharge = self.get_avg_height();
+                                self.profile_dirty = true;
+                                self.show_toast(format!("Water Discharge set to {:.1} mm", self.profile.water_discharge).as_str());
+                            }
+                        });
+
+                        // Auto-detect MWL/CWL — arms the state machine
+                        let auto_armed = self.cwl_state == AutoState::Armed || self.cwl_state == AutoState::Waiting;
+                        let auto_lbl = if auto_armed { "⏳ Auto-detect Armed…" } else { "Auto-detect MWL/CWL" };
+                        let auto_col = if auto_armed { self.col_btn_danger() } else { self.col_bg_btn() };
+                        let bb1 = egui::Button::new(RichText::new(auto_lbl).color(self.col_text())).fill(auto_col);
+                        if ui.add_sized([ui.available_width(), 24.0], bb1).clicked() {
+                            if auto_armed {
+                                // Cancel
+                                self.cwl_state = AutoState::Idle;
+                                self.rwl_state = AutoState::Idle;
+                            } else if self.profile.overflow <= 0.0 {
+                                self.show_toast("⚠ Set Overflow level in Calibration first!");
+                            } else {
+                                let h = self.get_avg_height();
+                                self.cwl_state = AutoState::Armed;
+                                self.cwl_peak  = h;
+                                self.cwl_timer = None;
+                                self.rwl_state = AutoState::Armed;
+                                self.rwl_timer = None;
+                                self.show_toast("Auto-detect armed — cut supply when ready.");
+                            }
+                        }
+
+                        // Manual CWL capture
+                        let bb2 = egui::Button::new(RichText::new("Manual Set CWL").color(self.col_text())).fill(self.col_bg_btn());
+                        if ui.add_sized([ui.available_width(), 24.0], bb2).clicked() {
+                            if self.profile.overflow <= 0.0 {
+                                self.show_toast("⚠ Set Overflow level in Calibration first!");
+                            } else {
+                                self.profile.cwl = self.get_avg_height();
+                                self.cwl_state   = AutoState::Done;
+                                self.show_toast("CWL captured manually.");
+                            }
+                        }
+
                         ui.add_space(6.0);
                         egui::Grid::new("limits_grid").num_columns(2).spacing([40.0, 4.0]).show(ui, |ui| {
                             ui.vertical(|ui| {
-                                ui.horizontal(|ui|{ ui.label(RichText::new("WL (fill):").color(self.col_gray())); ui.label(format!("{:.1} mm", self.profile.mwl)); });
-                                ui.horizontal(|ui|{ ui.label(RichText::new("MWL (fault):").color(self.col_gray())); ui.label("\u{2014}"); });
-                                ui.horizontal(|ui|{ ui.label(RichText::new("CWL (2s):").color(self.col_gray())); ui.label(format!("{:.1} mm", self.profile.cwl)); });
-                                ui.horizontal(|ui|{ ui.label(RichText::new("Residual WL:").color(self.col_gray())); ui.label("0.0 mm"); });
-                                ui.horizontal(|ui|{ ui.label(RichText::new("Water Disch.:").color(self.col_gray())); ui.label(format!("{:.1} mm", self.profile.water_discharge)); });
+                                ui.horizontal(|ui|{
+                                    ui.label(RichText::new("WL (fill):").color(self.col_gray())).on_hover_text("Nominal Water Level (NWL). Safety margin c = OF − NWL ≥ 20 mm (§5.2.6)");
+                                    ui.label(format!("{:.1} mm", self.profile.mwl));
+                                });
+                                ui.horizontal(|ui|{
+                                    ui.label(RichText::new("MWL (fault):").color(self.col_gray())).on_hover_text("Max Water Level during fault. Must be ≤ OF + 20 mm (§5.2.4a)");
+                                    if self.profile.mwl_fault > 0.0 {
+                                        ui.label(format!("{:.1} mm", self.profile.mwl_fault));
+                                    } else { ui.label("\u{2014}"); }
+                                });
+                                ui.horizontal(|ui|{
+                                    ui.label(RichText::new("CWL (2s):").color(self.col_gray())).on_hover_text("Critical Water Level 2 s after supply cut. Must be ≤ OF + 10 mm (§5.2.4b)");
+                                    if self.profile.cwl > 0.0 {
+                                        ui.label(format!("{:.1} mm", self.profile.cwl));
+                                    } else { ui.label("\u{2014}"); }
+                                });
+                                ui.horizontal(|ui|{
+                                    ui.label(RichText::new("Residual WL:").color(self.col_gray())).on_hover_text("Residual Water Level — minimum height after flush stabilises (§6.5)");
+                                    if self.profile.residual_wl > 0.0 {
+                                        ui.label(format!("{:.1} mm", self.profile.residual_wl));
+                                    } else { ui.label("\u{2014}"); }
+                                });
+                                ui.horizontal(|ui|{
+                                    ui.label(RichText::new("Water Disch.:").color(self.col_gray())).on_hover_text("Water Discharge inlet height. Air gap a = WD − CWL ≥ 20 mm (§5.2.7)");
+                                    ui.label(format!("{:.1} mm", self.profile.water_discharge));
+                                });
                             });
                             ui.vertical(|ui| {
-                                ui.horizontal(|ui|{ ui.label(RichText::new("Meniscus:").color(self.col_gray())); ui.label(format!("{:.1} mm", self.profile.meniscus)); });
-                                ui.horizontal(|ui|{ ui.label(RichText::new("Overflow:").color(self.col_gray())); ui.label(format!("{:.1} mm", self.profile.overflow)); });
-                                ui.horizontal(|ui|{ ui.label(RichText::new("Safety c:").color(self.col_gray())); ui.label(if self.profile.overflow > 0.0 { format!("{:.1} mm", self.profile.overflow - self.profile.mwl) } else { "\u{2014}".to_string() }); });
-                                ui.horizontal(|ui|{ ui.label(RichText::new("Live headroom:").color(self.col_gray())); ui.label(if self.profile.overflow > 0.0 { format!("{:.1} mm", self.profile.overflow - self.current_h) } else { "\u{2014}".to_string() }); });
+                                ui.horizontal(|ui|{
+                                    ui.label(RichText::new("Meniscus:").color(self.col_gray())).on_hover_text("Meniscus delta above OF after overflow stabilises. Must be ≤ 5 mm (§5.2.4c)");
+                                    ui.label(format!("{:.1} mm", self.profile.meniscus));
+                                });
+                                ui.horizontal(|ui|{
+                                    ui.label(RichText::new("Overflow:").color(self.col_gray())).on_hover_text("Overflow level (OF) — absolute height at which water overflows (§5.2.6)");
+                                    ui.label(format!("{:.1} mm", self.profile.overflow));
+                                });
+                                ui.horizontal(|ui|{
+                                    ui.label(RichText::new("Safety c:").color(self.col_gray()));
+                                    ui.label(if self.profile.overflow > 0.0 && self.profile.mwl > 0.0 {
+                                        format!("{:.1} mm", self.profile.overflow - self.profile.mwl)
+                                    } else { "\u{2014}".to_string() });
+                                });
+                                ui.horizontal(|ui|{
+                                    ui.label(RichText::new("Live headroom:").color(self.col_gray()));
+                                    ui.label(if self.profile.overflow > 0.0 {
+                                        format!("{:.1} mm", self.profile.overflow - self.current_h)
+                                    } else { "\u{2014}".to_string() });
+                                });
                             });
                         });
+
+                        // Dynamic CWL / RWL status labels
                         ui.add_space(6.0);
-                        ui.label(RichText::new("CWL: IDLE \u{2014} arm while at MWL").color(self.col_gray()));
-                        ui.label(RichText::new("RWL: IDLE (set WL to arm)").color(self.col_gray()));
+                        let cwl_label = match self.cwl_state {
+                            AutoState::Idle    => "CWL: IDLE — arm while at MWL".to_string(),
+                            AutoState::Armed   => format!("CWL: ARMED (peak {:.1} mm)", self.cwl_peak),
+                            AutoState::Waiting => "CWL: WAITING 2 s after drop…".to_string(),
+                            AutoState::Done    => format!("CWL: DONE → {:.1} mm", self.profile.cwl),
+                        };
+                        let cwl_col = match self.cwl_state {
+                            AutoState::Idle | AutoState::Done => self.col_gray(),
+                            AutoState::Armed   => self.col_orange(),
+                            AutoState::Waiting => self.col_accent(),
+                        };
+                        ui.label(RichText::new(&cwl_label).color(cwl_col));
+
+                        let rwl_label = match self.rwl_state {
+                            AutoState::Idle    => "RWL: IDLE (set WL to arm)".to_string(),
+                            AutoState::Armed   => "RWL: ARMED — waiting for flush drop…".to_string(),
+                            AutoState::Waiting => "RWL: WAITING 2 s after drop…".to_string(),
+                            AutoState::Done    => format!("RWL: DONE → {:.1} mm", self.profile.residual_wl),
+                        };
+                        let rwl_col = match self.rwl_state {
+                            AutoState::Idle | AutoState::Done => self.col_gray(),
+                            AutoState::Armed   => self.col_orange(),
+                            AutoState::Waiting => self.col_accent(),
+                        };
+                        ui.label(RichText::new(&rwl_label).color(rwl_col));
                     });
                     ui.add_space(5.0);
 
@@ -641,14 +1295,24 @@ impl eframe::App for CisternApp {
                                 let end_vol = self.v_buf.last_y().unwrap_or(0.0);
                                 let end_t = self.v_buf.last_x().unwrap_or(0.0);
                                 let is_full = self.flush_type_idx == 0;
+                                let vol_l = (self.flush_start_vol - end_vol).abs();
+                                let time_s = (end_t - self.flush_start_time).abs();
+                                // EN 14055 V2 rate: volume excluding first 1L and last 2L
+                                let en14055_rate = if vol_l > 3.0 && time_s > 0.0 {
+                                    Some((vol_l - 3.0) / time_s)
+                                } else {
+                                    None
+                                };
                                 self.flushes.push(FlushResult {
                                     is_full,
-                                    vol_l: (self.flush_start_vol - end_vol).abs(),
-                                    time_s: (end_t - self.flush_start_time).abs(),
+                                    vol_l,
+                                    time_s,
+                                    en14055_rate,
+                                    temp_c: self.current_temp,
                                 });
                             }
                         }
-                        ui.label(RichText::new("* EN col = rate ignoring first 1L and last 2L").color(self.col_gray()));
+                        ui.label(RichText::new("* EN col = rate excluding first 1 L and last 2 L").color(self.col_gray()));
 
                         TableBuilder::new(ui)
                             .striped(true).cell_layout(egui::Layout::left_to_right(egui::Align::Center))
@@ -667,7 +1331,13 @@ impl eframe::App for CisternApp {
                                         row.col(|ui|{ui.label(format!("{:.1}L", f.vol_l));});
                                         row.col(|ui|{ui.label(format!("{:.1}s", f.time_s));});
                                         row.col(|ui|{ui.label(format!("{:.2}", if f.time_s > 0.0 { f.vol_l / f.time_s } else { 0.0 }));});
-                                        row.col(|ui|{ui.label(RichText::new("\u{2014}").color(self.col_gray()));}); // placeholder EN
+                                        row.col(|ui|{
+                                            if let Some(en) = f.en14055_rate {
+                                                ui.label(RichText::new(format!("{:.2}", en)).color(self.col_accent()));
+                                            } else {
+                                                ui.label(RichText::new("\u{2014}").color(self.col_gray()));
+                                            }
+                                        });
                                         row.col(|ui|{if ui.button("X").clicked() { to_del = Some(i); }});
                                     });
                                 }
@@ -692,7 +1362,16 @@ impl eframe::App for CisternApp {
                         if ui.add_sized([ui.available_width(), 26.0], egui::Button::new(RichText::new(l_text).color(Color32::WHITE)).fill(l_col)).clicked() {
                             self.toggle_csv_log();
                         }
+                        if self.is_logging {
+                            ui.label(RichText::new("● Recording…").color(self.col_red()).size(12.0));
+                        }
                     });
+
+                    // Toast notification
+                    if self.toast_active() {
+                        ui.add_space(8.0);
+                        ui.label(RichText::new(&self.toast_msg).color(self.col_orange()));
+                    }
                 });
             });
         }
@@ -724,7 +1403,22 @@ impl eframe::App for CisternApp {
                 ui.checkbox(&mut self.chart_auto_scroll, "Auto-scroll");
                 ui.add_space(4.0);
                 if ui.button(if self.chart_paused { "▶ Resume" } else { "⏸ Pause" }).clicked() { self.chart_paused = !self.chart_paused; }
-                let _ = ui.button("Screenshot"); // Mocked
+                if ui.button("📷 Screenshot").on_hover_text("Export current chart data to CSV").clicked() {
+                    let fname = format!("chart_export_{}.csv", Local::now().format("%Y%m%d_%H%M%S"));
+                    if let Ok(mut f) = File::create(&fname) {
+                        let _ = writeln!(f, "Time(s),P(bar),H(mm),V(L),Flow(L/s)");
+                        let pts_p = self.p_buf.get_line_points();
+                        let pts_h = self.h_buf.get_line_points();
+                        let pts_v = self.v_buf.get_line_points();
+                        let pts_f = self.f_buf.get_line_points();
+                        let n = pts_p.len().min(pts_h.len()).min(pts_v.len()).min(pts_f.len());
+                        for i in 0..n {
+                            let _ = writeln!(f, "{:.3},{:.5},{:.1},{:.2},{:.3}",
+                                pts_p[i][0], pts_p[i][1], pts_h[i][1], pts_v[i][1], pts_f[i][1]);
+                        }
+                        self.show_toast(&format!("Chart exported: {}", fname));
+                    }
+                }
                 if ui.button("Clear Chart").clicked() { self.p_buf.clear(); self.h_buf.clear(); self.v_buf.clear(); self.f_buf.clear(); self.click_points.clear(); }
                 ui.add_space(6.0);
                 ui.label(RichText::new("Delta:").color(self.col_gray()));
@@ -737,9 +1431,36 @@ impl eframe::App for CisternApp {
             });
             ui.add_space(4.0);
 
-            // PLOT AREA
-            let active_buf = match self.plot_mode { PlotMode::Pressure=>&self.p_buf, PlotMode::Height=>&self.h_buf, PlotMode::Volume=>&self.v_buf, PlotMode::Flow=>&self.f_buf };
-            let line = Line::new(active_buf.get_line_points()).color(self.color_sensor).width(1.5).name("Sensor");
+            // PLOT AREA — apply window filter then smoothing
+            let raw_pts = match self.plot_mode {
+                PlotMode::Pressure => self.p_buf.get_line_points(),
+                PlotMode::Height   => self.h_buf.get_line_points(),
+                PlotMode::Volume   => self.v_buf.get_line_points(),
+                PlotMode::Flow     => self.f_buf.get_line_points(),
+            };
+
+            // Chart window filter
+            let window_secs: Option<f64> = match self.chart_window_val.as_str() {
+                "10s"  => Some(10.0),
+                "30s"  => Some(30.0),
+                "60s"  => Some(60.0),
+                "5min" => Some(300.0),
+                _      => None, // "All"
+            };
+            let windowed_pts: Vec<[f64; 2]> = if let Some(ws) = window_secs {
+                if let Some(last_t) = raw_pts.last().map(|p| p[0]) {
+                    raw_pts.into_iter().filter(|p| last_t - p[0] <= ws).collect()
+                } else { raw_pts }
+            } else { raw_pts };
+
+            // Apply chart smoothing
+            let display_pts: Vec<[f64; 2]> = if self.chart_smooth_val != "None" && windowed_pts.len() > 1 {
+                let ys: Vec<f64> = windowed_pts.iter().map(|p| p[1]).collect();
+                let smoothed = smooth(&ys, &self.chart_smooth_val);
+                windowed_pts.iter().zip(smoothed.iter()).map(|(p, &sy)| [p[0], sy]).collect()
+            } else { windowed_pts };
+
+            let line = Line::new(display_pts).color(self.color_sensor).width(1.5).name("Sensor");
 
             let plot_bg = if self.is_dark_mode { Color32::from_rgb(25, 25, 40) } else { Color32::from_rgb(248, 249, 252) };
             let grid_col = if self.is_dark_mode { Color32::from_rgb(60, 60, 80) } else { Color32::from_rgb(200, 204, 215) };
@@ -793,6 +1514,12 @@ impl eframe::App for CisternApp {
             });
         });
 
-        if self.sensor.is_connected { ctx.request_repaint(); }
+        // Keep repainting while connected or while detection timers are running
+        let detection_active = self.cwl_state == AutoState::Waiting
+            || self.rwl_state == AutoState::Waiting
+            || self.toast_active();
+        if self.sensor.is_connected || detection_active {
+            ctx.request_repaint();
+        }
     }
 }

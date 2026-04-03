@@ -12,6 +12,9 @@ __pycache__/
 *.pyo
 .pytest_cache/
 
+# Rust build output
+cistern_analytics/target/
+
 # Runtime data
 exports/*.csv
 config/settings.json

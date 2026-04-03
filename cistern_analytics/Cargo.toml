@@ -16,6 +16,7 @@ chrono = "0.4"
 directories = "5.0"
 image = { version = "0.25", features = ["ico"] }
 crossbeam-channel = "0.5"
+rfd = "0.14"
 
 [build-dependencies]
 winres = "0.1"
