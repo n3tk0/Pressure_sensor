@@ -53,6 +53,7 @@ pub struct CisternApp {
 
     target_port: String,
     target_baud: u32,
+    target_polling: u32,
     
     // UI Theme
     is_dark_mode: bool,
@@ -63,7 +64,18 @@ pub struct CisternApp {
     show_connection_modal: bool,
     show_compliance_modal: bool,
     show_program_modal: bool,
+    show_colors_modal: bool,
+    show_help_modal: bool,
+    show_about_modal: bool,
     left_panel_visible: bool,
+
+    // Line Colors
+    color_sensor: Color32,
+    color_cwl: Color32,
+    color_mwl: Color32,
+    color_menis: Color32,
+    color_wd: Color32,
+    color_of: Color32,
 
     // Combobox Option States
     setting_pressure_unit: String,
@@ -120,13 +132,23 @@ impl CisternApp {
             profile: prof,
             target_port: "COM8".to_string(), 
             target_baud: 115200,
+            target_polling: 50,
             is_dark_mode: true, // Defaulting to Dark
             theme_applied: false,
             show_calibration_modal: false,
             show_connection_modal: false,
             show_compliance_modal: false,
             show_program_modal: false,
+            show_colors_modal: false,
+            show_help_modal: false,
+            show_about_modal: false,
             left_panel_visible: true,
+            color_sensor: Color32::from_rgb(137, 180, 250),
+            color_cwl: Color32::from_rgb(250, 179, 135),
+            color_mwl: Color32::from_rgb(166, 227, 161),
+            color_menis: Color32::from_rgb(180, 130, 255),
+            color_wd: Color32::from_rgb(137, 180, 250),
+            color_of: Color32::from_rgb(243, 139, 168),
             setting_pressure_unit: "bar".to_string(),
             setting_avg_window: "0.5".to_string(),
             setting_cwl_mode: "Automatic".to_string(),
@@ -163,9 +185,39 @@ impl CisternApp {
     fn col_green(&self)  -> Color32 { if self.is_dark_mode { Color32::from_rgb(166, 227, 161) } else { Color32::from_rgb(64, 160, 43) } }
     fn col_red(&self)    -> Color32 { if self.is_dark_mode { Color32::from_rgb(243, 139, 168) } else { Color32::from_rgb(210, 15, 57) } }
     fn col_orange(&self) -> Color32 { if self.is_dark_mode { Color32::from_rgb(250, 179, 135) } else { Color32::from_rgb(254, 100, 11) } }
-    fn col_text(&self)   -> Color32 { if self.is_dark_mode { Color32::WHITE }                  else { Color32::BLACK } }
-    fn col_gray(&self)   -> Color32 { if self.is_dark_mode { Color32::GRAY }                   else { Color32::DARK_GRAY } }
-    fn col_bg_btn(&self) -> Color32 { if self.is_dark_mode { Color32::from_rgb(60, 60, 90) }   else { Color32::from_rgb(210, 210, 230) } }
+    fn col_text(&self)   -> Color32 { if self.is_dark_mode { Color32::from_rgb(205, 214, 244) } else { Color32::from_rgb(76, 79, 105) } }
+    fn col_gray(&self)   -> Color32 { if self.is_dark_mode { Color32::from_rgb(166, 173, 200) } else { Color32::from_rgb(140, 143, 160) } }
+    fn col_bg_btn(&self) -> Color32 { if self.is_dark_mode { Color32::from_rgb(55, 55, 85) }    else { Color32::from_rgb(180, 185, 205) } }
+    fn col_btn_success(&self) -> Color32 { if self.is_dark_mode { Color32::from_rgb(35, 90, 55) } else { Color32::from_rgb(45, 145, 75) } }
+    fn col_btn_danger(&self)  -> Color32 { if self.is_dark_mode { Color32::from_rgb(100, 40, 50) } else { Color32::from_rgb(175, 45, 60) } }
+
+    fn apply_theme(&self, ctx: &egui::Context) {
+        let mut vis = if self.is_dark_mode { egui::Visuals::dark() } else { egui::Visuals::light() };
+        vis.widgets.noninteractive.rounding = egui::Rounding::same(8.0);
+        vis.widgets.inactive.rounding = egui::Rounding::same(6.0);
+        vis.widgets.hovered.rounding = egui::Rounding::same(6.0);
+        vis.widgets.active.rounding = egui::Rounding::same(6.0);
+        vis.window_rounding = egui::Rounding::same(8.0);
+        
+        vis.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+
+        if self.is_dark_mode {
+            vis.window_fill = Color32::from_rgb(30, 30, 46); // WindowBg
+            vis.panel_fill  = Color32::from_rgb(42, 42, 61); // ChildBg
+            vis.extreme_bg_color = Color32::from_rgb(55, 55, 77); // Input Fields Background
+            vis.widgets.inactive.bg_fill = Color32::from_rgb(55, 55, 85);
+            vis.widgets.hovered.bg_fill  = Color32::from_rgb(75, 75, 110);
+            vis.widgets.active.bg_fill   = Color32::from_rgb(90, 90, 130);
+        } else {
+            vis.window_fill = Color32::from_rgb(239, 241, 245);
+            vis.panel_fill  = Color32::from_rgb(220, 224, 232);
+            vis.extreme_bg_color = Color32::from_rgb(204, 208, 218);
+            vis.widgets.inactive.bg_fill = Color32::from_rgb(180, 185, 205);
+            vis.widgets.hovered.bg_fill  = Color32::from_rgb(162, 168, 192);
+            vis.widgets.active.bg_fill   = Color32::from_rgb(144, 151, 178);
+        }
+        ctx.set_visuals(vis);
+    }
 
     fn toggle_csv_log(&mut self) {
         if self.is_logging {
@@ -248,9 +300,31 @@ impl CisternApp {
             ui.label("Connect to AL1060 IO-Link Master:");
             ui.add_space(5.0);
             egui::Grid::new("conn_grid").show(ui, |ui| {
-                ui.label("COM Port:"); ui.text_edit_singleline(&mut self.target_port); ui.end_row();
-                ui.label("Baud Rate:"); ui.add(egui::DragValue::new(&mut self.target_baud)); ui.end_row();
-                ui.label("Polling (ms):"); ui.add(egui::DragValue::new(&mut 50)); ui.label("(fixed config)"); ui.end_row();
+                ui.label("COM Port:");
+                egui::ComboBox::from_id_source("conn_port").selected_text(&self.target_port).show_ui(ui, |ui| {
+                    if let Ok(ports) = serialport::available_ports() {
+                        for p in ports {
+                            ui.selectable_value(&mut self.target_port, p.port_name.clone(), p.port_name);
+                        }
+                    }
+                });
+                ui.end_row();
+
+                ui.label("Baud Rate:");
+                egui::ComboBox::from_id_source("conn_baud").selected_text(self.target_baud.to_string()).show_ui(ui, |ui| {
+                    for &b in &[9600, 19200, 38400, 57600, 115200, 230400, 460800] {
+                        ui.selectable_value(&mut self.target_baud, b, b.to_string());
+                    }
+                });
+                ui.end_row();
+
+                ui.label("Polling (ms):");
+                egui::ComboBox::from_id_source("conn_poll").selected_text(self.target_polling.to_string()).show_ui(ui, |ui| {
+                    for &p in &[10, 20, 50, 100, 200, 500] {
+                        ui.selectable_value(&mut self.target_polling, p, p.to_string());
+                    }
+                });
+                ui.end_row();
             });
             ui.add_space(10.0);
             ui.horizontal(|ui| {
@@ -258,6 +332,52 @@ impl CisternApp {
             });
         });
         self.show_connection_modal = is_open;
+    }
+
+    fn draw_colors_modal(&mut self, ctx: &egui::Context) {
+        let mut is_open = self.show_colors_modal;
+        egui::Window::new("Chart Line Colors").open(&mut is_open).collapsible(false).show(ctx, |ui| {
+            ui.label("Click a swatch to change color.");
+            ui.add_space(6.0);
+            egui::Grid::new("line_colors_grid").show(ui, |ui| {
+                ui.label("Sensor:"); ui.color_edit_button_srgba(&mut self.color_sensor); ui.end_row();
+                ui.label("MWL:"); ui.color_edit_button_srgba(&mut self.color_mwl); ui.end_row();
+                ui.label("Meniscus:"); ui.color_edit_button_srgba(&mut self.color_menis); ui.end_row();
+                ui.label("Water Disch.:"); ui.color_edit_button_srgba(&mut self.color_wd); ui.end_row();
+                ui.label("CWL (fault):"); ui.color_edit_button_srgba(&mut self.color_cwl); ui.end_row();
+                ui.label("Overflow:"); ui.color_edit_button_srgba(&mut self.color_of); ui.end_row();
+            });
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui.button("Close").clicked() { self.show_colors_modal = false; }
+            });
+        });
+        self.show_colors_modal = is_open;
+    }
+
+    fn draw_help_modal(&mut self, ctx: &egui::Context) {
+        let mut is_open = self.show_help_modal;
+        egui::Window::new("Help Guide").open(&mut is_open).collapsible(false).show(ctx, |ui| {
+            ui.heading("Usage Guide");
+            ui.add_space(4.0);
+            ui.label("- Connect to your AL1060 IO-Link Master via the Connections menu.\n- Observe live metrics in the Left Panel and set limits.\n- Flush Test metrics conform to EN 14055 standards.");
+            ui.add_space(10.0);
+            if ui.button("Close").clicked() { self.show_help_modal = false; }
+        });
+        self.show_help_modal = is_open;
+    }
+
+    fn draw_about_modal(&mut self, ctx: &egui::Context) {
+        let mut is_open = self.show_about_modal;
+        egui::Window::new("About").open(&mut is_open).collapsible(false).show(ctx, |ui| {
+            ui.heading("Cistern Analytics");
+            ui.add_space(4.0);
+            ui.label("Version 1.0 (Rust Edition)");
+            ui.label("Rebuilt with Rust & egui for high-speed robust industrial testing.");
+            ui.add_space(10.0);
+            if ui.button("Close").clicked() { self.show_about_modal = false; }
+        });
+        self.show_about_modal = is_open;
     }
 
     fn draw_program_modal(&mut self, ctx: &egui::Context) {
@@ -336,8 +456,7 @@ impl eframe::App for CisternApp {
 
         // Theme Switch Logic
         if !self.theme_applied {
-            if self.is_dark_mode { ctx.set_visuals(egui::Visuals::dark()); } 
-            else { ctx.set_visuals(egui::Visuals::light()); }
+            self.apply_theme(ctx);
             self.theme_applied = true;
         }
 
@@ -345,7 +464,8 @@ impl eframe::App for CisternApp {
         for evt in self.sensor.poll_events() {
             match evt {
                 SensorEvent::Connected => self.sensor.update_profile(self.profile.clone()),
-                SensorEvent::Disconnected | SensorEvent::Error(_) => {},
+                SensorEvent::Disconnected => {},
+                SensorEvent::Error(err) => { eprintln!("Sensor Error: {}", err); },
                 SensorEvent::Data(pt) => { 
                     self.current_p = pt.pressure_bar; self.current_h = pt.height_mm; self.current_v = pt.volume_l; self.current_temp = pt.temp_c;
                     let last_v = self.v_buf.last_y().unwrap_or(0.0);
@@ -371,6 +491,9 @@ impl eframe::App for CisternApp {
         self.draw_calibration_modal(ctx);
         self.draw_connection_modal(ctx);
         self.draw_program_modal(ctx);
+        self.draw_colors_modal(ctx);
+        self.draw_help_modal(ctx);
+        self.draw_about_modal(ctx);
         
         let mut sc = self.show_compliance_modal;
         egui::Window::new("Compliance Report").open(&mut sc).show(ctx, |ui| {
@@ -395,7 +518,7 @@ impl eframe::App for CisternApp {
                     if ui.button("Hardware Connection...").clicked() { self.show_connection_modal = true; ui.close_menu(); }
                     if ui.button("Edit Calibration Profile...").clicked() { self.show_calibration_modal = true; ui.close_menu(); }
                     if ui.button("Program Settings...").clicked() { self.show_program_modal = true; ui.close_menu(); }
-                    let _ = ui.button("Chart Line Colors...");
+                    if ui.button("Chart Line Colors...").clicked() { self.show_colors_modal = true; ui.close_menu(); }
                 });
                 ui.menu_button("Test", |ui| {
                     if ui.button("EN 14055 Compliance Check").clicked() { 
@@ -405,9 +528,9 @@ impl eframe::App for CisternApp {
                     }
                 });
                 ui.menu_button("Help", |ui| { 
-                    let _ = ui.button("Help...");
+                    if ui.button("Help...").clicked() { self.show_help_modal = true; ui.close_menu(); }
                     ui.separator();
-                    let _ = ui.button("About..."); 
+                    if ui.button("About...").clicked() { self.show_about_modal = true; ui.close_menu(); }
                 });
             });
         });
@@ -423,7 +546,7 @@ impl eframe::App for CisternApp {
                         if ui.button("Connect Sensor").clicked() { self.sensor.connect(self.target_port.clone(), self.target_baud); }
                         ui.label(RichText::new("Disconnected").color(self.col_gray()));
                     } else {
-                        let btn = egui::Button::new(RichText::new("Disconnect").color(self.col_text())).fill(self.col_red());
+                        let btn = egui::Button::new(RichText::new("Disconnect").color(Color32::WHITE)).fill(self.col_btn_danger());
                         if ui.add(btn).clicked() { self.sensor.disconnect(); }
                         ui.label(RichText::new(format!("{} {}", self.target_port, self.target_baud)).color(self.col_green()));
                     }
@@ -506,8 +629,8 @@ impl eframe::App for CisternApp {
                         });
                         
                         let btn_text = if self.is_flushing { "Stop Flush Measurement" } else { "Start Flush Measurement" };
-                        let btn_col = if self.is_flushing { self.col_red() } else { self.col_green() };
-                        let btn = egui::Button::new(RichText::new(btn_text).color(self.col_text())).fill(btn_col);
+                        let btn_col = if self.is_flushing { self.col_btn_danger() } else { self.col_btn_success() };
+                        let btn = egui::Button::new(RichText::new(btn_text).color(Color32::WHITE)).fill(btn_col);
                         if ui.add_sized([ui.available_width(), 26.0], btn).clicked() {
                             if !self.is_flushing {
                                 self.is_flushing = true;
@@ -565,8 +688,8 @@ impl eframe::App for CisternApp {
                     // 4. DATA LOG
                     egui::CollapsingHeader::new(RichText::new("DATA LOG").strong()).default_open(true).show(ui, |ui| {
                         let l_text = if self.is_logging { "Stop Data Log (CSV)" } else { "Start Data Log (CSV)" };
-                        let l_col = if self.is_logging { self.col_red() } else { self.col_green() };
-                        if ui.add_sized([ui.available_width(), 26.0], egui::Button::new(RichText::new(l_text).color(self.col_text())).fill(l_col)).clicked() {
+                        let l_col = if self.is_logging { self.col_btn_danger() } else { self.col_btn_success() };
+                        if ui.add_sized([ui.available_width(), 26.0], egui::Button::new(RichText::new(l_text).color(Color32::WHITE)).fill(l_col)).clicked() {
                             self.toggle_csv_log();
                         }
                     });
@@ -580,6 +703,7 @@ impl eframe::App for CisternApp {
                 ui.label("Axis:"); 
                 egui::ComboBox::from_id_source("cb_axis").selected_text(match self.plot_mode { PlotMode::Height=>"Height (mm)", PlotMode::Volume=>"Volume (L)", PlotMode::Flow=>"Flow Rate (L/s)", _=>"Pressure" })
                     .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.plot_mode, PlotMode::Pressure, "Pressure (bar)");
                         ui.selectable_value(&mut self.plot_mode, PlotMode::Height, "Height (mm)");
                         ui.selectable_value(&mut self.plot_mode, PlotMode::Volume, "Volume (L)");
                         ui.selectable_value(&mut self.plot_mode, PlotMode::Flow, "Flow Rate (L/s)");
@@ -615,7 +739,7 @@ impl eframe::App for CisternApp {
 
             // PLOT AREA
             let active_buf = match self.plot_mode { PlotMode::Pressure=>&self.p_buf, PlotMode::Height=>&self.h_buf, PlotMode::Volume=>&self.v_buf, PlotMode::Flow=>&self.f_buf };
-            let line = Line::new(active_buf.get_line_points()).color(self.col_accent()).width(1.5).name("Sensor");
+            let line = Line::new(active_buf.get_line_points()).color(self.color_sensor).width(1.5).name("Sensor");
 
             let plot_bg = if self.is_dark_mode { Color32::from_rgb(25, 25, 40) } else { Color32::from_rgb(248, 249, 252) };
             let grid_col = if self.is_dark_mode { Color32::from_rgb(60, 60, 80) } else { Color32::from_rgb(200, 204, 215) };
@@ -628,11 +752,17 @@ impl eframe::App for CisternApp {
                 // override_text_color applies to axis text digits
                 vis.override_text_color = Some(axis_text);
 
-                Plot::new("telemetry_plot")
-                    .view_aspect(2.0)
-                    .auto_bounds(egui::Vec2b::new(self.chart_auto_scroll && !self.chart_paused, self.chart_auto_scroll && !self.chart_paused))
-                    .allow_drag(self.chart_paused).allow_zoom(self.chart_paused).legend(egui_plot::Legend::default())
-                    .show(ui, |plot_ui| {
+                let mut plot = Plot::new("telemetry_plot")
+                    .allow_drag(self.chart_paused)
+                    .allow_zoom(self.chart_paused)
+                    .allow_scroll(false) // Directs standard mouse wheel to Zoom instead of Pan
+                    .legend(egui_plot::Legend::default());
+                
+                if self.chart_auto_scroll && !self.chart_paused {
+                    plot = plot.auto_bounds(egui::Vec2b::new(true, true));
+                }
+
+                let _response = plot.show(ui, |plot_ui| {
                         // Plot crosshairs mimicking crosshairs=True in DPG
                         if let Some(pos) = plot_ui.pointer_coordinate() {
                             let cross_col = grid_col.linear_multiply(0.8);
@@ -642,12 +772,12 @@ impl eframe::App for CisternApp {
 
                         plot_ui.line(line);
                         if self.plot_mode == PlotMode::Height {
-                            if self.profile.overflow > 0.0 { plot_ui.hline(HLine::new(self.profile.overflow).color(self.col_red()).name("Overflow")); }
-                            if self.profile.mwl > 0.0 { plot_ui.hline(HLine::new(self.profile.mwl).color(self.col_accent()).name("MWL")); }
-                            if self.profile.cwl > 0.0 { plot_ui.hline(HLine::new(self.profile.cwl).color(self.col_orange()).name("CWL")); }
-                            if self.profile.water_discharge > 0.0 { plot_ui.hline(HLine::new(self.profile.water_discharge).color(self.col_accent()).name("Water Disch.")); }
+                            if self.profile.overflow > 0.0 { plot_ui.hline(HLine::new(self.profile.overflow).color(self.color_of).name("Overflow")); }
+                            if self.profile.mwl > 0.0 { plot_ui.hline(HLine::new(self.profile.mwl).color(self.color_mwl).name("MWL")); }
+                            if self.profile.cwl > 0.0 { plot_ui.hline(HLine::new(self.profile.cwl).color(self.color_cwl).name("CWL")); }
+                            if self.profile.water_discharge > 0.0 { plot_ui.hline(HLine::new(self.profile.water_discharge).color(self.color_wd).name("Water Disch.")); }
                             let menis_abs = if self.profile.overflow > 0.0 { self.profile.overflow + self.profile.meniscus } else { 0.0 };
-                            if menis_abs > 0.0 { plot_ui.hline(HLine::new(menis_abs).color(Color32::from_rgb(180, 130, 255)).name("Meniscus")); }
+                            if menis_abs > 0.0 { plot_ui.hline(HLine::new(menis_abs).color(self.color_menis).name("Meniscus")); }
                         }
                         if !self.click_points.is_empty() {
                             let pts = Points::new(self.click_points.clone()).radius(6.0).color(self.col_red());

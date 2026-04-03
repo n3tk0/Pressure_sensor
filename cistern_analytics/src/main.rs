@@ -22,8 +22,8 @@ fn main() -> Result<(), eframe::Error> {
     // Application window configuration
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1200.0, 800.0])
-            .with_min_inner_size([800.0, 600.0])
+            .with_inner_size([1400.0, 900.0])
+            .with_min_inner_size([1320.0, 720.0])
             .with_title("EN 14055 Cistern Analytics (Rust)")
             .with_icon(std::sync::Arc::new(load_icon().unwrap())),
         ..Default::default()
@@ -32,7 +32,16 @@ fn main() -> Result<(), eframe::Error> {
     eframe::run_native(
         "EN 14055 Cistern Analytics",
         options,
-        Box::new(|_cc| {
+        Box::new(|cc| {
+            let mut fonts = egui::FontDefinitions::default();
+            fonts.font_data.insert("samsung".to_owned(), egui::FontData::from_static(include_bytes!("../../fonts/SamsungSans-Regular.ttf")));
+            fonts.families.get_mut(&egui::FontFamily::Proportional).unwrap().insert(0, "samsung".to_owned());
+            // Increase global font size slightly
+            let mut style = (*cc.egui_ctx.style()).clone();
+            for (_ts, font_id) in style.text_styles.iter_mut() { font_id.size *= 1.25; }
+            cc.egui_ctx.set_style(style);
+            cc.egui_ctx.set_fonts(fonts);
+
             Box::new(CisternApp::new()) as Box<dyn eframe::App>
         }),
     )
