@@ -307,3 +307,225 @@ pub fn smooth(data: &[f64], alg: &str) -> Vec<f64> {
 
     data.to_vec()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── interp_hv ───────────────────────────────────────────────────────────
+
+    fn pt(p: f64, h: f64, v: f64) -> CalibrationPoint { CalibrationPoint { p, h, v } }
+
+    fn profile_with(pts: Vec<CalibrationPoint>) -> CisternProfile {
+        let mut prof = CisternProfile::default();
+        prof.points = pts;
+        prof.sort_points();
+        prof
+    }
+
+    #[test]
+    fn interp_empty_returns_zeros() {
+        let prof = profile_with(vec![]);
+        assert_eq!(prof.interp_hv(1.0), (0.0, 0.0));
+    }
+
+    #[test]
+    fn interp_single_point_returns_that_point() {
+        let prof = profile_with(vec![pt(1.0, 100.0, 5.0)]);
+        assert_eq!(prof.interp_hv(1.0), (100.0, 5.0));
+    }
+
+    #[test]
+    fn interp_midpoint_two_points() {
+        let prof = profile_with(vec![pt(0.0, 0.0, 0.0), pt(2.0, 200.0, 10.0)]);
+        let (h, v) = prof.interp_hv(1.0);
+        assert!((h - 100.0).abs() < 1e-9);
+        assert!((v - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn interp_extrapolates_below() {
+        let prof = profile_with(vec![pt(1.0, 100.0, 5.0), pt(2.0, 200.0, 10.0)]);
+        let (h, v) = prof.interp_hv(0.5);
+        assert!((h - 50.0).abs() < 1e-9);
+        assert!((v - 2.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn interp_extrapolates_above() {
+        let prof = profile_with(vec![pt(1.0, 100.0, 5.0), pt(2.0, 200.0, 10.0)]);
+        let (h, _) = prof.interp_hv(3.0);
+        assert!((h - 300.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn interp_three_points_inner_segment() {
+        let prof = profile_with(vec![
+            pt(0.0, 0.0, 0.0), pt(1.0, 100.0, 5.0), pt(2.0, 180.0, 9.0),
+        ]);
+        let (h, v) = prof.interp_hv(1.5);
+        assert!((h - 140.0).abs() < 1e-9);
+        assert!((v - 7.0).abs() < 1e-9);
+    }
+
+    // ── smooth ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn smooth_none_returns_copy() {
+        let d = vec![1.0, 2.0, 3.0];
+        assert_eq!(smooth(&d, "None"), d);
+    }
+
+    #[test]
+    fn smooth_sma5_length_preserved() {
+        let d: Vec<f64> = (0..20).map(|i| i as f64).collect();
+        assert_eq!(smooth(&d, "SMA-5").len(), 20);
+    }
+
+    #[test]
+    fn smooth_ema_fast_steady_stays_constant() {
+        let d = vec![10.0; 20];
+        let r = smooth(&d, "EMA-Fast");
+        assert!((r.last().unwrap() - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn smooth_dema_length_preserved() {
+        let d: Vec<f64> = (0..15).map(|i| i as f64).collect();
+        assert_eq!(smooth(&d, "DEMA").len(), 15);
+    }
+
+    #[test]
+    fn smooth_dema_steady_state() {
+        let d = vec![5.0f64; 30];
+        let r = smooth(&d, "DEMA");
+        assert!((r.last().unwrap() - 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn smooth_median_removes_spike() {
+        let mut d = vec![5.0f64; 5];
+        d[2] = 100.0;
+        let r = smooth(&d, "Median-5");
+        assert!((r[2] - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn smooth_kalman_length_preserved() {
+        let d: Vec<f64> = (0..10).map(|i| i as f64).collect();
+        assert_eq!(smooth(&d, "Kalman").len(), 10);
+    }
+
+    #[test]
+    fn smooth_kalman_first_element_unchanged() {
+        let d = vec![42.0, 0.0, 0.0, 0.0];
+        assert!((smooth(&d, "Kalman")[0] - 42.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn smooth_savitzky_golay_flat_signal() {
+        let d = vec![7.0f64; 20];
+        let r = smooth(&d, "Savitzky-Golay");
+        for v in r { assert!((v - 7.0).abs() < 1e-9); }
+    }
+
+    // ── run_compliance_checks ───────────────────────────────────────────────
+
+    fn full_flush(vol: f64) -> FlushResult {
+        FlushResult { is_full: true, vol_l: vol, time_s: 10.0, en14055_rate: None, temp_c: None }
+    }
+    fn part_flush(vol: f64) -> FlushResult {
+        FlushResult { is_full: false, vol_l: vol, time_s: 10.0, en14055_rate: None, temp_c: None }
+    }
+
+    #[test]
+    fn compliance_safety_margin_pass() {
+        let mut p = CisternProfile::default();
+        p.overflow = 250.0; p.mwl = 220.0;
+        let flags = run_compliance_checks(&p, &[]);
+        assert!(flags.iter().any(|f| f.contains("[PASS]") && f.contains("Safety margin")));
+    }
+
+    #[test]
+    fn compliance_safety_margin_fail() {
+        let mut p = CisternProfile::default();
+        p.overflow = 250.0; p.mwl = 235.0;
+        let flags = run_compliance_checks(&p, &[]);
+        assert!(flags.iter().any(|f| f.contains("[FAIL]") && f.contains("Safety margin")));
+    }
+
+    #[test]
+    fn compliance_air_gap_pass() {
+        let mut p = CisternProfile::default();
+        p.water_discharge = 300.0; p.cwl = 275.0;
+        let flags = run_compliance_checks(&p, &[]);
+        assert!(flags.iter().any(|f| f.contains("[PASS]") && f.contains("Air gap")));
+    }
+
+    #[test]
+    fn compliance_air_gap_fail() {
+        let mut p = CisternProfile::default();
+        p.water_discharge = 300.0; p.cwl = 285.0;
+        let flags = run_compliance_checks(&p, &[]);
+        assert!(flags.iter().any(|f| f.contains("[FAIL]") && f.contains("Air gap")));
+    }
+
+    #[test]
+    fn compliance_full_flush_pass() {
+        let p = CisternProfile::default();
+        let results: Vec<FlushResult> = (0..3).map(|_| full_flush(5.5)).collect();
+        let flags = run_compliance_checks(&p, &results);
+        assert!(flags.iter().any(|f| f.contains("[PASS]") && f.contains("Full flush")));
+    }
+
+    #[test]
+    fn compliance_full_flush_fail() {
+        let p = CisternProfile::default();
+        let results: Vec<FlushResult> = (0..3).map(|_| full_flush(6.5)).collect();
+        let flags = run_compliance_checks(&p, &results);
+        assert!(flags.iter().any(|f| f.contains("[FAIL]") && f.contains("Full flush")));
+    }
+
+    #[test]
+    fn compliance_part_flush_pass() {
+        let p = CisternProfile::default();
+        let results: Vec<FlushResult> = (0..3).map(|_| part_flush(3.5)).collect();
+        let flags = run_compliance_checks(&p, &results);
+        assert!(flags.iter().any(|f| f.contains("[PASS]") && f.contains("Part flush")));
+    }
+
+    #[test]
+    fn compliance_warns_fewer_than_3_full_flushes() {
+        let p = CisternProfile::default();
+        let results = vec![full_flush(5.0), full_flush(5.0)];
+        let flags = run_compliance_checks(&p, &results);
+        assert!(flags.iter().any(|f| f.contains("[WARN]") && f.contains("Full flush")));
+    }
+
+    #[test]
+    fn compliance_warns_fewer_than_3_part_flushes() {
+        let p = CisternProfile::default();
+        let results = vec![part_flush(3.0)];
+        let flags = run_compliance_checks(&p, &results);
+        assert!(flags.iter().any(|f| f.contains("[WARN]") && f.contains("Part flush")));
+    }
+
+    #[test]
+    fn compliance_residual_wl_info() {
+        let mut p = CisternProfile::default();
+        p.residual_wl = 42.0;
+        let flags = run_compliance_checks(&p, &[]);
+        assert!(flags.iter().any(|f| f.contains("[INFO]") && f.contains("Residual")));
+    }
+
+    #[test]
+    fn compliance_temp_info_shown() {
+        let p = CisternProfile::default();
+        let results: Vec<FlushResult> = (0..3).map(|_| FlushResult {
+            is_full: true, vol_l: 5.5, time_s: 10.0,
+            en14055_rate: None, temp_c: Some(18.0),
+        }).collect();
+        let flags = run_compliance_checks(&p, &results);
+        assert!(flags.iter().any(|f| f.contains("[INFO]") && f.to_lowercase().contains("temp")));
+    }
+}

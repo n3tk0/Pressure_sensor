@@ -1,24 +1,22 @@
 """
-Unit tests for pure logic in sensor_app.py.
+Unit tests for pure logic in sensor_core.py.
 
-Coverage areas (matching Audit.md CQ-10):
-  - smooth()            — SMA, EMA, "None", edge cases
-  - interp_hv()         — interpolation, extrapolation, edge cases
+Coverage:
+  - smooth()                — SMA, EMA, DEMA, Median, Kalman, Savitzky-Golay, None, edge cases
+  - interp_hv()             — interpolation, extrapolation, edge cases
   - p_convert / p_format / p_parse_to_bar — pressure unit round-trips
-  - CalibrationPoint    — dataclass construction
-  - CisternProfile      — to_dict / from_dict / clone round-trips
-  - EN 14055 arithmetic — safety margin, MWL, CWL, meniscus, air gap thresholds
-  - Flush compliance    — PASS/FAIL volume thresholds, count checks
-
-All tests use only pure Python; no DearPyGui window is created.
+  - CalibrationPoint        — dataclass construction
+  - CisternProfile          — to_dict / from_dict / clone round-trips
+  - EN 14055 arithmetic     — safety margin, MWL, CWL, meniscus, air gap thresholds
+  - Flush compliance        — PASS/FAIL volume thresholds, count checks
+  - run_compliance_checks() — full output tag verification
+  - _decode_sensor_status() — PI1789 status byte decoding
+  - tick_cwl_auto()         — CWL state machine transitions
 """
 import math
-import sys
-import os
+import time
 import pytest
-
-# conftest.py already set SENSOR_APP_TESTING and mocked dearpygui/serial
-import sensor_app as sa
+import sensor_core as sa
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -33,6 +31,12 @@ def make_pt(p, h, v):
 def fresh_cache(pts):
     """Rebuild the interpolation cache with the given CalibrationPoint list."""
     sa._rebuild_interp_cache(pts)
+
+
+def make_flush(type_str, vol, time_s=10.0, en14055_rate=None, temp_c=None):
+    """Shorthand for a flush result dict."""
+    return {"type": type_str, "vol": vol, "time": time_s,
+            "en14055_rate": en14055_rate, "temp_c": temp_c}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -447,3 +451,252 @@ class TestFlushCompliance:
         volumes = [6.0, 6.0, 6.1]
         avg = sum(volumes) / len(volumes)
         assert avg > sa.EN14055_FULL_FLUSH_MAX_L
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# smooth() — extended algorithms
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestSmoothExtended:
+    def test_dema_length_preserved(self):
+        data = [float(i) for i in range(20)]
+        result = sa.smooth(data, "DEMA")
+        assert len(result) == 20
+
+    def test_dema_steady_state(self):
+        data = [10.0] * 30
+        result = sa.smooth(data, "DEMA")
+        assert result[-1] == pytest.approx(10.0, abs=1e-6)
+
+    def test_median5_length_preserved(self):
+        data = [3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0]
+        result = sa.smooth(data, "Median")
+        assert len(result) == 7
+
+    def test_median5_removes_spike(self):
+        # A single spike in the middle should be removed
+        data = [5.0, 5.0, 100.0, 5.0, 5.0]
+        result = sa.smooth(data, "Median")
+        assert result[2] == pytest.approx(5.0)
+
+    def test_kalman_length_preserved(self):
+        data = [float(i) for i in range(10)]
+        result = sa.smooth(data, "Kalman")
+        assert len(result) == 10
+
+    def test_kalman_first_element_unchanged(self):
+        data = [42.0] + [0.0] * 9
+        result = sa.smooth(data, "Kalman")
+        assert result[0] == pytest.approx(42.0)
+
+    def test_savitzky_golay_length_preserved(self):
+        data = [float(i) for i in range(20)]
+        result = sa.smooth(data, "Savitzky-Golay")
+        assert len(result) == 20
+
+    def test_savitzky_golay_flat_signal_unchanged(self):
+        data = [7.0] * 20
+        result = sa.smooth(data, "Savitzky-Golay")
+        for v in result:
+            assert v == pytest.approx(7.0, abs=1e-9)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _decode_sensor_status()
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestDecodeSensorStatus:
+    def test_all_bits_set_is_ok(self):
+        label, ok = sa._decode_sensor_status(0xFF)
+        assert label == "OK"
+        assert ok is True
+
+    def test_ready_bit_clear_is_fault(self):
+        # Bit 7 (0x80) clear → FAULT
+        label, ok = sa._decode_sensor_status(0x7F)
+        assert label == "FAULT"
+        assert ok is False
+
+    def test_overrange_bit_clear(self):
+        # Bit 6 (0x40) clear (but bit 7 set) → Over-range
+        label, ok = sa._decode_sensor_status(0xBF)
+        assert label == "Over-range"
+        assert ok is False
+
+    def test_underrange_bit_clear(self):
+        # Bit 5 (0x20) clear (bits 7+6 set) → Under-range
+        label, ok = sa._decode_sensor_status(0xDF)
+        assert label == "Under-range"
+        assert ok is False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# run_compliance_checks()
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestRunComplianceChecks:
+    def _make_profile(self, **kwargs):
+        p = sa.CisternProfile()
+        for k, v in kwargs.items():
+            setattr(p, k, v)
+        return p
+
+    def test_empty_flushes_reports_no_measurements(self):
+        p = self._make_profile()
+        results, _ = sa.run_compliance_checks(p, [])
+        assert any("no measurements" in r for r in results)
+
+    def test_safety_margin_pass(self):
+        p = self._make_profile(overflow=250.0, mwl=220.0)
+        results, _ = sa.run_compliance_checks(p, [])
+        assert any("[PASS]" in r and "Safety margin" in r for r in results)
+
+    def test_safety_margin_fail(self):
+        p = self._make_profile(overflow=250.0, mwl=235.0)
+        results, _ = sa.run_compliance_checks(p, [])
+        assert any("[FAIL]" in r and "Safety margin" in r for r in results)
+
+    def test_mwl_fault_pass(self):
+        p = self._make_profile(overflow=250.0, mwl_fault=265.0)
+        results, _ = sa.run_compliance_checks(p, [])
+        assert any("[PASS]" in r and "MWL fault" in r for r in results)
+
+    def test_mwl_fault_fail(self):
+        p = self._make_profile(overflow=250.0, mwl_fault=275.0)
+        results, _ = sa.run_compliance_checks(p, [])
+        assert any("[FAIL]" in r and "MWL fault" in r for r in results)
+
+    def test_cwl_pass(self):
+        p = self._make_profile(overflow=250.0, cwl=258.0)
+        results, _ = sa.run_compliance_checks(p, [])
+        assert any("[PASS]" in r and "CWL" in r for r in results)
+
+    def test_cwl_fail(self):
+        p = self._make_profile(overflow=250.0, cwl=265.0)
+        results, _ = sa.run_compliance_checks(p, [])
+        assert any("[FAIL]" in r and "CWL" in r for r in results)
+
+    def test_meniscus_pass(self):
+        p = self._make_profile(meniscus=3.0)
+        results, _ = sa.run_compliance_checks(p, [])
+        assert any("[PASS]" in r and "Meniscus" in r for r in results)
+
+    def test_meniscus_fail(self):
+        p = self._make_profile(meniscus=6.0)
+        results, _ = sa.run_compliance_checks(p, [])
+        assert any("[FAIL]" in r and "Meniscus" in r for r in results)
+
+    def test_air_gap_pass(self):
+        p = self._make_profile(water_discharge=300.0, cwl=275.0)
+        results, air_gap = sa.run_compliance_checks(p, [])
+        assert any("[PASS]" in r and "Air gap" in r for r in results)
+        assert air_gap == pytest.approx(25.0)
+
+    def test_air_gap_fail(self):
+        p = self._make_profile(water_discharge=300.0, cwl=285.0)
+        results, air_gap = sa.run_compliance_checks(p, [])
+        assert any("[FAIL]" in r and "Air gap" in r for r in results)
+        assert air_gap == pytest.approx(15.0)
+
+    def test_full_flush_pass(self):
+        p = self._make_profile()
+        flushes = [make_flush("Full", 5.5) for _ in range(3)]
+        results, _ = sa.run_compliance_checks(p, flushes)
+        assert any("[PASS]" in r and "Full flush" in r for r in results)
+
+    def test_full_flush_fail(self):
+        p = self._make_profile()
+        flushes = [make_flush("Full", 6.5) for _ in range(3)]
+        results, _ = sa.run_compliance_checks(p, flushes)
+        assert any("[FAIL]" in r and "Full flush" in r for r in results)
+
+    def test_part_flush_pass(self):
+        p = self._make_profile()
+        flushes = [make_flush("Part", 3.5) for _ in range(3)]
+        results, _ = sa.run_compliance_checks(p, flushes)
+        assert any("[PASS]" in r and "Part flush" in r for r in results)
+
+    def test_part_flush_fail(self):
+        p = self._make_profile()
+        flushes = [make_flush("Part", 4.5) for _ in range(3)]
+        results, _ = sa.run_compliance_checks(p, flushes)
+        assert any("[FAIL]" in r and "Part flush" in r for r in results)
+
+    def test_warns_fewer_than_3_full_flushes(self):
+        p = self._make_profile()
+        flushes = [make_flush("Full", 5.0), make_flush("Full", 5.0)]
+        results, _ = sa.run_compliance_checks(p, flushes)
+        assert any("[WARN]" in r and "Full flush" in r for r in results)
+
+    def test_warns_fewer_than_3_part_flushes(self):
+        p = self._make_profile()
+        flushes = [make_flush("Part", 3.0)]
+        results, _ = sa.run_compliance_checks(p, flushes)
+        assert any("[WARN]" in r and "Part flush" in r for r in results)
+
+    def test_residual_wl_info(self):
+        p = self._make_profile(residual_wl=42.0)
+        results, _ = sa.run_compliance_checks(p, [])
+        assert any("[INFO]" in r and "Residual WL" in r for r in results)
+
+    def test_en14055_flow_rate_info(self):
+        p = self._make_profile()
+        flushes = [make_flush("Full", 5.5, en14055_rate=0.35) for _ in range(3)]
+        results, _ = sa.run_compliance_checks(p, flushes)
+        assert any("[INFO]" in r and "flow rate" in r.lower() for r in results)
+
+    def test_water_temp_info(self):
+        p = self._make_profile()
+        flushes = [make_flush("Full", 5.5, temp_c=18.0) for _ in range(3)]
+        results, _ = sa.run_compliance_checks(p, flushes)
+        assert any("[INFO]" in r and "temp" in r.lower() for r in results)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# tick_cwl_auto() — CWL state machine
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestTickCwlAuto:
+    def _make_app(self):
+        app = sa.SensorApp()
+        # Disable smoothing so peak/drop arithmetic uses raw values
+        app.app_settings["cwl_smooth"] = "None"
+        return app
+
+    def test_idle_state_no_action(self):
+        app = self._make_app()
+        app.cwl_auto_state = "IDLE"
+        result = app.tick_cwl_auto(100.0, [100.0] * 10, list(range(10)))
+        assert result is False
+        assert app.cwl_auto_state == "IDLE"
+
+    def test_armed_tracks_peak(self):
+        app = self._make_app()
+        app.cwl_auto_state = "ARMED"
+        app.cwl_auto_peak = 100.0
+        # Feed a height higher than peak
+        app.tick_cwl_auto(110.0, [100.0, 105.0, 110.0], [0.0, 0.5, 1.0])
+        assert app.cwl_auto_peak == pytest.approx(110.0)
+
+    def test_armed_transitions_to_waiting_after_drop(self):
+        app = self._make_app()
+        app.cwl_auto_state = "ARMED"
+        app.cwl_auto_peak = 110.0
+        # Feed height that dropped 1.5 mm below peak
+        h_history = [110.0] * 8 + [108.5, 108.5]
+        t_history = [float(i) * 0.1 for i in range(10)]
+        app.tick_cwl_auto(108.5, h_history, t_history)
+        assert app.cwl_auto_state == "WAITING"
+
+    def test_waiting_captures_cwl_after_2s(self):
+        app = self._make_app()
+        app.cwl_auto_state = "WAITING"
+        # Set timer 3 seconds in the past so 2s have elapsed
+        app.cwl_auto_timer = time.time() - 3.0
+        # Populate height buffer so get_avg_height can return something
+        app.t_buf.extend([0.0, 0.1])
+        app.h_buf.extend([105.0, 106.0])
+        result = app.tick_cwl_auto(106.0, [106.0] * 5, [0.0] * 5)
+        assert result is True
+        assert app.cwl_auto_state == "DONE"
+        assert app.profile.cwl > 0.0

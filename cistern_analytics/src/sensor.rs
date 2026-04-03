@@ -28,6 +28,8 @@ pub enum SensorCommand {
     Connect { port: String, baud: u32, io_port: u32, polling_ms: u32 },
     Disconnect,
     UpdateProfile(CisternProfile),
+    /// Update temperature calibration offset (°C).
+    SetTempOffset(f64),
 }
 
 pub enum SensorEvent {
@@ -64,6 +66,10 @@ impl SensorCore {
         let _ = self.tx_cmd.send(SensorCommand::UpdateProfile(profile));
     }
 
+    pub fn set_temp_offset(&self, offset: f64) {
+        let _ = self.tx_cmd.send(SensorCommand::SetTempOffset(offset));
+    }
+
     pub fn poll_events(&mut self) -> Vec<SensorEvent> {
         let mut events = Vec::new();
         while let Ok(evt) = self.rx_evt.try_recv() {
@@ -85,6 +91,7 @@ impl SensorCore {
             let marker: &[u8] = b"\x01\x0110";
             let mut profile = CisternProfile::default();
             let mut io_port: u32 = 1;
+            let mut temp_offset: f64 = 0.0;
 
             loop {
                 match rx_cmd.try_recv() {
@@ -109,6 +116,9 @@ impl SensorCore {
                     }
                     Ok(SensorCommand::UpdateProfile(p)) => {
                         profile = p;
+                    }
+                    Ok(SensorCommand::SetTempOffset(off)) => {
+                        temp_offset = off;
                     }
                     Err(TryRecvError::Disconnected) => break,
                     Err(TryRecvError::Empty) => {}
@@ -164,8 +174,8 @@ impl SensorCore {
                                             {
                                                 // Validate pressure range
                                                 if pressure >= PRESSURE_MIN_BAR && pressure <= PRESSURE_MAX_BAR {
-                                                    // Validate temperature range
-                                                    let validated_temp = temp.filter(|&t| {
+                                                    // Apply temp offset then validate range
+                                                    let validated_temp = temp.map(|t| t + temp_offset).filter(|&t| {
                                                         t >= TEMP_MIN_C && t <= TEMP_MAX_C
                                                     });
                                                     let (h, v) = profile.interp_hv(pressure);
