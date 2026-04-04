@@ -1048,12 +1048,11 @@ impl CisternApp {
                         ui.label(RichText::new(format!("Current profile: \"{}\"", self.profile.name)).strong());
                     }
                     2 => {
-                        ui.label("In the left panel, under EN 14055 LIMITS:");
+                        ui.label("① In Settings → Edit Calibration Profile, set Overflow (OF) and Water Discharge (WD).");
                         ui.add_space(4.0);
-                        ui.label("① Press \"Set Overflow (OF)\" when water is at the overflow lip.");
-                        ui.label("② Press \"Auto-detect MWL/CWL\" while the cistern is full, then cut the supply.");
-                        ui.label("③ Press \"Set Meniscus\" after the water surface stabilises.");
-                        ui.label("④ Press \"Set Water Discharge (WD)\" at the inlet valve height.");
+                        ui.label("② In the left panel under EN 14055 LIMITS:");
+                        ui.label("   • Press \"Auto-detect MWL/CWL\" while the cistern is full, then cut the supply.");
+                        ui.label("   • Press \"Set Meniscus\" after the water surface stabilises.");
                     }
                     3 => {
                         ui.label("Select Full Flush or Part Flush in the FLUSH TEST section.");
@@ -1497,22 +1496,6 @@ impl eframe::App for CisternApp {
                                 } else {
                                     self.show_toast("⚠ Set Overflow level in Calibration first!");
                                 }
-                            }
-                        });
-
-                        // Set Overflow and Water Discharge from live reading
-                        ui.horizontal(|ui| {
-                            let b_of = egui::Button::new(RichText::new("Set Overflow (OF)").color(self.col_text())).fill(self.col_bg_btn());
-                            if ui.add_sized([150.0, 24.0], b_of).on_hover_text("Capture current height as Overflow level (OF). §5.2.6").clicked() {
-                                self.profile.overflow = self.get_avg_height();
-                                self.profile_dirty = true;
-                                self.show_toast(format!("Overflow set to {:.1} mm", self.profile.overflow).as_str());
-                            }
-                            let b_wd = egui::Button::new(RichText::new("Set Water Discharge (WD)").color(self.col_text())).fill(self.col_bg_btn());
-                            if ui.add_sized([150.0, 24.0], b_wd).on_hover_text("Capture current height as Water Discharge inlet level (WD). §5.2.7 air gap = WD − CWL ≥ 20 mm").clicked() {
-                                self.profile.water_discharge = self.get_avg_height();
-                                self.profile_dirty = true;
-                                self.show_toast(format!("Water Discharge set to {:.1} mm", self.profile.water_discharge).as_str());
                             }
                         });
 
