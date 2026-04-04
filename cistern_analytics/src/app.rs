@@ -1,5 +1,5 @@
 use crate::sensor::{SensorCore, SensorEvent};
-use crate::logic::{CisternProfile, CalibrationPoint, FlushResult, run_compliance_checks, smooth};
+use crate::logic::{CisternProfile, CalibrationPoint, FlushResult, run_compliance_checks, smooth, smooth_last};
 use eframe::egui;
 use egui::{Color32, RichText, Key, Modifiers};
 use egui_extras::{TableBuilder, Column};
@@ -142,7 +142,7 @@ pub struct CisternApp {
     plot_mode: PlotMode,
     click_points: Vec<[f64; 2]>,
     
-    csv_file: Option<File>,
+    csv_file: Option<std::io::BufWriter<File>>, // buffered to avoid per-sample syscalls
     is_logging: bool,
     
     flush_type_idx: usize,
@@ -210,6 +210,12 @@ pub struct CisternApp {
     vol_unit_ml: bool,
     // Item 19: CSV log size tracking for auto-rollover (10 MB)
     csv_bytes_written: u64,
+    // Cached avg_window parsed value — updated on settings load/save
+    avg_window_s: f64,
+    // Chart display cache — avoids re-smoothing every frame
+    chart_cache_gen: usize,
+    chart_cache_key: (usize, PlotMode, String, String), // (gen, mode, window, smooth)
+    display_pts_cache: Vec<[f64; 2]>,
     // Item 6: recently used profile paths (persisted in settings)
     recent_profiles: Vec<String>,
     // Item 20: UI font scale factor
@@ -306,6 +312,10 @@ impl CisternApp {
             flush_vlines: Vec::new(),
             vol_unit_ml: false,
             csv_bytes_written: 0,
+            avg_window_s: 0.5,
+            chart_cache_gen: 0,
+            chart_cache_key: (usize::MAX, PlotMode::Height, String::new(), String::new()),
+            display_pts_cache: Vec::new(),
             recent_profiles: Vec::new(),
             font_scale: 1.0,
             show_wizard: false,
@@ -336,7 +346,7 @@ impl CisternApp {
 
     // ── Averaging window helper (mirrors Python get_avg_height) ──────────
     fn get_avg_height(&self) -> f64 {
-        let window_s: f64 = self.setting_avg_window.parse().unwrap_or(0.5);
+        let window_s = self.avg_window_s;
         let pts = self.h_buf.get_line_points();
         if pts.is_empty() { return self.current_h; }
         let now = pts.last().map(|p| p[0]).unwrap_or(0.0);
@@ -500,6 +510,7 @@ impl CisternApp {
                 self.recent_profiles       = s.recent_profiles;
                 self.font_scale            = s.font_scale;
                 self.show_wizard           = s.first_run; // show on first-ever run
+                self.avg_window_s          = self.setting_avg_window.parse().unwrap_or(0.5);
             }
         }
         // Push loaded temp offset to sensor thread
@@ -560,13 +571,14 @@ impl CisternApp {
         }
     }
 
-    /// Open a fresh CSV segment (used on start and on 10 MB rollover). Returns true on success.
+    /// Open a fresh BufWriter CSV segment. Returns true on success.
     fn open_new_csv_segment(&mut self) -> bool {
         let fname = format!("EN14055_Record_{}.csv", Local::now().format("%Y%m%d_%H%M%S"));
         match File::create(&fname) {
-            Ok(mut f) => {
-                let _ = writeln!(f, "Time(s),P(bar),H(mm),V(L),Flow(L/s),Temp(C)");
-                self.csv_file = Some(f);
+            Ok(f) => {
+                let mut bw = std::io::BufWriter::new(f);
+                let _ = writeln!(bw, "Time(s),P(bar),H(mm),V(L),Flow(L/s),Temp(C)");
+                self.csv_file = Some(bw);
                 self.csv_bytes_written = 0;
                 self.is_logging = true;
                 true
@@ -920,16 +932,15 @@ impl CisternApp {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 if ui.button("Save").clicked() {
+                    self.avg_window_s = self.setting_avg_window.parse().unwrap_or(0.5);
                     self.save_settings();
-                    // Apply temp offset immediately to running sensor thread
                     if let Ok(off) = self.setting_temp_offset.parse::<f64>() {
                         self.sensor.set_temp_offset(off);
                     }
                     self.show_program_modal = false;
                 }
                 if ui.button("Cancel").clicked() {
-                    // Reload saved settings to discard in-dialog changes
-                    self.load_settings();
+                    self.load_settings(); // also refreshes avg_window_s
                     self.show_program_modal = false;
                 }
                 if ui.button("Reset to Defaults").clicked() {
@@ -946,6 +957,7 @@ impl CisternApp {
                     self.is_dark_mode          = true;
                     self.theme_applied         = false;
                     self.font_scale            = 1.0;
+                    self.avg_window_s          = 0.5;
                     self.save_settings();
                     self.show_program_modal = false;
                 }
@@ -1141,6 +1153,7 @@ impl eframe::App for CisternApp {
                     self.h_buf.push([pt.time_s, pt.height_mm]);
                     self.v_buf.push([pt.time_s, pt.volume_l]);
                     self.f_buf.push([pt.time_s, self.current_f]);
+                    self.chart_cache_gen = self.chart_cache_gen.wrapping_add(1);
 
                     // Keep rolling height history for CWL/RWL smoothing (last 200 samples)
                     self.h_history.push(pt.height_mm);
@@ -1149,9 +1162,8 @@ impl eframe::App for CisternApp {
                     // ── CWL auto-detect state machine ──────────────────
                     if self.cwl_state == AutoState::Armed {
                         if pt.height_mm > self.cwl_peak { self.cwl_peak = pt.height_mm; }
-                        let alg = self.setting_cwl_smooth.clone();
-                        let sm = smooth(&self.h_history, &alg);
-                        let smoothed = sm.last().copied().unwrap_or(pt.height_mm);
+                        // smooth_last: O(W) for SMA, O(N) for EMA — no full-vector allocation
+                        let smoothed = smooth_last(&self.h_history, &self.setting_cwl_smooth);
                         let drop_thresh: f64 = self.setting_cwl_drop.parse().unwrap_or(1.5);
                         if self.cwl_peak - smoothed >= drop_thresh {
                             self.cwl_state = AutoState::Waiting;
@@ -1168,10 +1180,7 @@ impl eframe::App for CisternApp {
 
                     // ── RWL auto-detect state machine ──────────────────
                     if self.rwl_state == AutoState::Armed {
-                        // Wait for water level to drop then start 2s timer
-                        let alg = self.setting_cwl_smooth.clone();
-                        let sm = smooth(&self.h_history, &alg);
-                        let smoothed = sm.last().copied().unwrap_or(pt.height_mm);
+                        let smoothed = smooth_last(&self.h_history, &self.setting_cwl_smooth);
                         let drop_thresh: f64 = self.setting_cwl_drop.parse().unwrap_or(1.5);
                         if self.cwl_peak - smoothed >= drop_thresh {
                             self.rwl_state = AutoState::Waiting;
@@ -1783,36 +1792,44 @@ impl eframe::App for CisternApp {
             });
             ui.add_space(4.0);
 
-            // PLOT AREA — apply window filter then smoothing
-            let raw_pts = match self.plot_mode {
-                PlotMode::Pressure => self.p_buf.get_line_points(),
-                PlotMode::Height   => self.h_buf.get_line_points(),
-                PlotMode::Volume   => self.v_buf.get_line_points(),
-                PlotMode::Flow     => self.f_buf.get_line_points(),
-            };
+            // PLOT AREA — rebuild display cache only when data or settings change
+            let current_key = (
+                self.chart_cache_gen,
+                self.plot_mode,
+                self.chart_window_val.clone(),
+                self.chart_smooth_val.clone(),
+            );
+            if current_key != self.chart_cache_key {
+                self.chart_cache_key = current_key;
 
-            // Chart window filter
-            let window_secs: Option<f64> = match self.chart_window_val.as_str() {
-                "10s"  => Some(10.0),
-                "30s"  => Some(30.0),
-                "60s"  => Some(60.0),
-                "5min" => Some(300.0),
-                _      => None, // "All"
-            };
-            let windowed_pts: Vec<[f64; 2]> = if let Some(ws) = window_secs {
-                if let Some(last_t) = raw_pts.last().map(|p| p[0]) {
-                    raw_pts.into_iter().filter(|p| last_t - p[0] <= ws).collect()
-                } else { raw_pts }
-            } else { raw_pts };
+                let raw_pts = match self.plot_mode {
+                    PlotMode::Pressure => self.p_buf.get_line_points(),
+                    PlotMode::Height   => self.h_buf.get_line_points(),
+                    PlotMode::Volume   => self.v_buf.get_line_points(),
+                    PlotMode::Flow     => self.f_buf.get_line_points(),
+                };
 
-            // Apply chart smoothing
-            let display_pts: Vec<[f64; 2]> = if self.chart_smooth_val != "None" && windowed_pts.len() > 1 {
-                let ys: Vec<f64> = windowed_pts.iter().map(|p| p[1]).collect();
-                let smoothed = smooth(&ys, &self.chart_smooth_val);
-                windowed_pts.iter().zip(smoothed.iter()).map(|(p, &sy)| [p[0], sy]).collect()
-            } else { windowed_pts };
+                let window_secs: Option<f64> = match self.chart_window_val.as_str() {
+                    "10s"  => Some(10.0),
+                    "30s"  => Some(30.0),
+                    "60s"  => Some(60.0),
+                    "5min" => Some(300.0),
+                    _      => None,
+                };
+                let windowed_pts: Vec<[f64; 2]> = if let Some(ws) = window_secs {
+                    if let Some(last_t) = raw_pts.last().map(|p| p[0]) {
+                        raw_pts.into_iter().filter(|p| last_t - p[0] <= ws).collect()
+                    } else { raw_pts }
+                } else { raw_pts };
 
-            let line = Line::new(display_pts).color(self.color_sensor).width(1.5).name("Sensor");
+                self.display_pts_cache = if self.chart_smooth_val != "None" && windowed_pts.len() > 1 {
+                    let ys: Vec<f64> = windowed_pts.iter().map(|p| p[1]).collect();
+                    let smoothed = smooth(&ys, &self.chart_smooth_val);
+                    windowed_pts.iter().zip(smoothed.iter()).map(|(p, &sy)| [p[0], sy]).collect()
+                } else { windowed_pts };
+            }
+
+            let line = Line::new(self.display_pts_cache.clone()).color(self.color_sensor).width(1.5).name("Sensor");
 
             let plot_bg = if self.is_dark_mode { Color32::from_rgb(25, 25, 40) } else { Color32::from_rgb(248, 249, 252) };
             let grid_col = if self.is_dark_mode { Color32::from_rgb(60, 60, 80) } else { Color32::from_rgb(200, 204, 215) };

@@ -213,16 +213,17 @@ pub fn smooth(data: &[f64], alg: &str) -> Vec<f64> {
     if data.len() < 2 || alg == "None" { return data.to_vec(); }
     let n = data.len();
 
-    // ── SMA (Simple Moving Average) ──
+    // ── SMA (Simple Moving Average) — O(N) sliding-window sum ──
     if alg.starts_with("SMA") {
         let w: usize = alg.split('-').nth(1)
             .and_then(|s| s.parse().ok())
             .unwrap_or(5);
         let mut r = Vec::with_capacity(n);
+        let mut window_sum = 0.0_f64;
         for i in 0..n {
-            let s = i.saturating_sub(w.saturating_sub(1));
-            let sum: f64 = data[s..=i].iter().sum();
-            r.push(sum / (i - s + 1) as f64);
+            window_sum += data[i];
+            if i >= w { window_sum -= data[i - w]; }
+            r.push(window_sum / (i + 1).min(w) as f64);
         }
         return r;
     }
@@ -254,19 +255,23 @@ pub fn smooth(data: &[f64], alg: &str) -> Vec<f64> {
         return ema1.iter().zip(ema2.iter()).map(|(e1, e2)| 2.0 * e1 - e2).collect();
     }
 
-    // ── Median Filter (window 5) ──
+    // ── Median Filter — fixed stack array, no per-element heap allocation ──
     if alg.starts_with("Median") {
         let w: usize = alg.split('-').nth(1)
             .and_then(|s| s.parse().ok())
-            .unwrap_or(5);
+            .unwrap_or(5)
+            .min(9); // cap at 9 to fit the fixed-size scratch array below
         let half = w / 2;
         let mut r = Vec::with_capacity(n);
+        let mut scratch = [0.0_f64; 9];
         for i in 0..n {
             let lo = i.saturating_sub(half);
             let hi = (i + half + 1).min(n);
-            let mut window: Vec<f64> = data[lo..hi].to_vec();
-            window.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            r.push(window[window.len() / 2]);
+            let slice = &data[lo..hi];
+            scratch[..slice.len()].copy_from_slice(slice);
+            let buf = &mut scratch[..slice.len()];
+            buf.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            r.push(buf[buf.len() / 2]);
         }
         return r;
     }
@@ -306,6 +311,35 @@ pub fn smooth(data: &[f64], alg: &str) -> Vec<f64> {
     }
 
     data.to_vec()
+}
+
+/// Compute only the *last* smoothed value without allocating the full output vector.
+/// Used by the CWL/RWL state machines which need only `smooth(history).last()`.
+pub fn smooth_last(data: &[f64], alg: &str) -> f64 {
+    if data.is_empty() { return 0.0; }
+    let raw_last = *data.last().unwrap();
+    if data.len() < 2 || alg == "None" { return raw_last; }
+    let n = data.len();
+
+    // SMA: average of last W samples — O(W)
+    if alg.starts_with("SMA") {
+        let w: usize = alg.split('-').nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5)
+            .min(n);
+        return data[n - w..].iter().sum::<f64>() / w as f64;
+    }
+
+    // EMA: single forward pass — O(N) but no allocation
+    if alg.starts_with("EMA") {
+        let a = if alg.contains("Fast") { 0.2_f64 } else { 0.05_f64 };
+        let mut ema = data[0];
+        for &x in &data[1..] { ema = a * x + (1.0 - a) * ema; }
+        return ema;
+    }
+
+    // For heavier algorithms fall back to the full smooth and take the last element
+    smooth(data, alg).last().copied().unwrap_or(raw_last)
 }
 
 #[cfg(test)]
