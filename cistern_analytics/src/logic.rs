@@ -92,6 +92,20 @@ pub struct FlushResult {
     pub compliance_pass: Option<bool>,
 }
 
+/// A matched pair of one full flush followed by one part flush.
+/// This is the fundamental unit of an EN 14055 test cycle.
+#[derive(Clone, Debug)]
+pub struct FlushPair {
+    pub full: FlushResult,
+    pub part: FlushResult,
+}
+
+/// Flatten pairs into a flat `Vec<FlushResult>` for use with
+/// `run_compliance_checks` (which expects the old flat slice).
+pub fn flush_pairs_to_results(pairs: &[FlushPair]) -> Vec<FlushResult> {
+    pairs.iter().flat_map(|p| [p.full.clone(), p.part.clone()]).collect()
+}
+
 /// Validate a single flush measurement against EN 14055 volume limits.
 ///
 /// * `class`             – cistern classification (Class1 / Class2)
