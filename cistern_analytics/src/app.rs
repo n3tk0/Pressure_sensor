@@ -1036,9 +1036,9 @@ impl CisternApp {
                         ui.add_space(8.0);
                         let connected = self.sensor.is_connected;
                         if connected {
-                            ui.label(RichText::new("✓ Sensor connected!").color(self.col_green()));
+                            ui.label(RichText::new("[OK] Sensor connected!").color(self.col_green()));
                         } else {
-                            ui.label(RichText::new("● Not connected yet.").color(self.col_gray()));
+                            ui.label(RichText::new("Not connected yet.").color(self.col_gray()));
                         }
                     }
                     1 => {
@@ -1048,9 +1048,9 @@ impl CisternApp {
                         ui.label(RichText::new(format!("Current profile: \"{}\"", self.profile.name)).strong());
                     }
                     2 => {
-                        ui.label("① In Settings → Edit Calibration Profile, set Overflow (OF) and Water Discharge (WD).");
+                        ui.label("1. In Settings → Edit Calibration Profile, set Overflow (OF) and Water Discharge (WD).");
                         ui.add_space(4.0);
-                        ui.label("② In the left panel under EN 14055 LIMITS:");
+                        ui.label("2. In the left panel under EN 14055 LIMITS:");
                         ui.label("   • Press \"Auto-detect MWL/CWL\" while the cistern is full, then cut the supply.");
                         ui.label("   • Press \"Set Meniscus\" after the water surface stabilises.");
                     }
@@ -1387,7 +1387,7 @@ impl eframe::App for CisternApp {
             ui.horizontal(|ui| {
                 if ui.button("<<").clicked() { self.left_panel_visible = !self.left_panel_visible; }
                 // Item 13: theme toggle button
-                let theme_icon = if self.is_dark_mode { "☀" } else { "🌙" };
+                let theme_icon = if self.is_dark_mode { "Light" } else { "Dark" };
                 if ui.button(theme_icon).on_hover_text("Toggle Dark / Light theme").clicked() {
                     self.is_dark_mode = !self.is_dark_mode;
                     self.theme_applied = false;
@@ -1420,12 +1420,12 @@ impl eframe::App for CisternApp {
                         let hms = format!("{:02}:{:02}:{:02}", e / 3600, (e % 3600) / 60, e % 60);
                         ui.label(RichText::new(format!("Session: {}", hms)).color(self.col_gray()));
                     }
-                    // Item 16: sensor status indicator with fault history in hover
-                    let (status_icon, status_col) = if self.sensor.is_connected {
+                    // Item 16: sensor status indicator — painted circle avoids font glyph fallback
+                    let dot_col = if self.sensor.is_connected {
                         let ok = self.sensor_status_text == "OK";
-                        ("●", if ok { self.col_green() } else { self.col_red() })
+                        if ok { self.col_green() } else { self.col_red() }
                     } else {
-                        ("●", self.col_gray())
+                        self.col_gray()
                     };
                     let fault_hover = if !self.last_fault_text.is_empty() {
                         if let Some(at) = self.last_fault_at {
@@ -1437,8 +1437,9 @@ impl eframe::App for CisternApp {
                     } else {
                         self.sensor_status_text.clone()
                     };
-                    ui.label(RichText::new(status_icon).color(status_col))
-                        .on_hover_text(fault_hover);
+                    let (dot_resp, painter) = ui.allocate_painter(egui::vec2(14.0, 14.0), egui::Sense::hover());
+                    painter.circle_filled(dot_resp.rect.center(), 6.0, dot_col);
+                    dot_resp.on_hover_text(fault_hover);
                 });
             });
         });
@@ -1761,7 +1762,7 @@ impl eframe::App for CisternApp {
                                     }
                                 });
                             let mins = WINDOWS[self.log_window_idx].1;
-                            if ui.button("💾 Save CSV").on_hover_text(
+                            if ui.button("Save CSV").on_hover_text(
                                 format!("Export the last {} minute(s) of buffered data to a CSV file", mins)
                             ).clicked() {
                                 self.export_last_minutes(mins);
@@ -1781,7 +1782,11 @@ impl eframe::App for CisternApp {
         // ---- RIGHT PANEL (PLOT & TOOLBAR) ----
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.label("Axis:"); 
+                let avail_w = ui.available_width();
+                let show_extras = avail_w > 520.0; // Export CSV + Reset Zoom inline when wide
+                let show_delta  = avail_w > 350.0; // Delta inline when medium+
+
+                ui.label("Axis:");
                 egui::ComboBox::from_id_source("cb_axis").selected_text(match self.plot_mode { PlotMode::Height=>"Height (mm)", PlotMode::Volume=>"Volume (L)", PlotMode::Flow=>"Flow Rate (L/s)", _=>"Pressure" })
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut self.plot_mode, PlotMode::Pressure, "Pressure (bar)");
@@ -1795,58 +1800,109 @@ impl eframe::App for CisternApp {
                     for val in ["10s", "30s", "60s", "5min", "All"] { ui.selectable_value(&mut self.chart_window_val, val.to_string(), val); }
                 });
                 ui.add_space(4.0);
-                ui.label("Smooth:");
-                egui::ComboBox::from_id_source("cb_smo").selected_text(&self.chart_smooth_val).show_ui(ui, |ui|{ 
-                    for val in ["None", "SMA-5", "SMA-20", "EMA-Fast", "EMA-Slow", "DEMA", "Median-5", "Kalman", "Savitzky-Golay"] {
-                        ui.selectable_value(&mut self.chart_smooth_val, val.to_string(), val);
-                    }
-                });
-                ui.add_space(4.0);
-                // Item 17: volume unit toggle
-                egui::ComboBox::from_id_source("cb_volunit").selected_text(if self.vol_unit_ml { "mL" } else { "L" }).show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.vol_unit_ml, false, "L");
-                    ui.selectable_value(&mut self.vol_unit_ml, true, "mL");
-                });
-                ui.add_space(4.0);
                 ui.checkbox(&mut self.chart_auto_scroll, "Auto-scroll");
                 ui.add_space(4.0);
-                if ui.button(if self.chart_paused { "▶ Resume" } else { "⏸ Pause" }).clicked() { self.chart_paused = !self.chart_paused; }
-                if ui.button("📷 Screenshot").on_hover_text("Export current chart data to CSV").clicked() {
-                    let fname = format!("chart_export_{}.csv", Local::now().format("%Y%m%d_%H%M%S"));
-                    if let Ok(mut f) = File::create(&fname) {
-                        let _ = writeln!(f, "Time(s),P(bar),H(mm),V(L),Flow(L/s)");
-                        let pts_p = self.p_buf.get_line_points();
-                        let pts_h = self.h_buf.get_line_points();
-                        let pts_v = self.v_buf.get_line_points();
-                        let pts_f = self.f_buf.get_line_points();
-                        let n = pts_p.len().min(pts_h.len()).min(pts_v.len()).min(pts_f.len());
-                        for i in 0..n {
-                            let _ = writeln!(f, "{:.3},{:.5},{:.1},{:.2},{:.3}",
-                                pts_p[i][0], pts_p[i][1], pts_h[i][1], pts_v[i][1], pts_f[i][1]);
+                if ui.button(if self.chart_paused { "Resume" } else { "Pause" }).clicked() { self.chart_paused = !self.chart_paused; }
+
+                if show_extras {
+                    ui.add_space(4.0);
+                    if ui.button("Export CSV").on_hover_text("Export current chart data to CSV").clicked() {
+                        let fname = format!("chart_export_{}.csv", Local::now().format("%Y%m%d_%H%M%S"));
+                        if let Ok(mut f) = File::create(&fname) {
+                            let _ = writeln!(f, "Time(s),P(bar),H(mm),V(L),Flow(L/s)");
+                            let pts_p = self.p_buf.get_line_points();
+                            let pts_h = self.h_buf.get_line_points();
+                            let pts_v = self.v_buf.get_line_points();
+                            let pts_f = self.f_buf.get_line_points();
+                            let n = pts_p.len().min(pts_h.len()).min(pts_v.len()).min(pts_f.len());
+                            for i in 0..n {
+                                let _ = writeln!(f, "{:.3},{:.5},{:.1},{:.2},{:.3}",
+                                    pts_p[i][0], pts_p[i][1], pts_h[i][1], pts_v[i][1], pts_f[i][1]);
+                            }
+                            self.show_toast(&format!("Chart exported: {}", fname));
                         }
-                        self.show_toast(&format!("Chart exported: {}", fname));
+                    }
+                    if ui.button("Reset Zoom").on_hover_text("Reset chart pan/zoom to fit all data").clicked() {
+                        self.reset_zoom = true;
                     }
                 }
-                if ui.button("Clear Chart").clicked() {
-                    self.p_buf.clear(); self.h_buf.clear();
-                    self.v_buf.clear(); self.f_buf.clear();
-                    self.click_points.clear();
-                    self.chart_cache_gen = self.chart_cache_gen.wrapping_add(1); // invalidate display cache
+
+                if show_delta {
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("Delta:").color(self.col_gray()));
+                    if self.click_points.len() == 2 {
+                        let dt = (self.click_points[1][0] - self.click_points[0][0]).abs();
+                        let dy = self.click_points[1][1] - self.click_points[0][1];
+                        let slope = if dt > 0.001 { dy / dt } else { 0.0 };
+                        ui.label(RichText::new(format!("{:.1}s | Δ{:.2} | {:.3}/s", dt, dy, slope)).color(self.col_accent()));
+                    } else {
+                        ui.label(RichText::new("\u{2014}").color(self.col_accent()));
+                    }
+                    if ui.button("Clear").clicked() { self.click_points.clear(); }
                 }
-                // Item 15: zoom reset
-                if ui.button("⟳ Reset Zoom").on_hover_text("Reset chart pan/zoom to fit all data").clicked() {
-                    self.reset_zoom = true;
-                }
-                ui.add_space(6.0);
-                ui.label(RichText::new("Delta:").color(self.col_gray()));
-                if self.click_points.len() == 2 {
-                    let dt = (self.click_points[1][0] - self.click_points[0][0]).abs();
-                    let dy = self.click_points[1][1] - self.click_points[0][1];
-                    // Item 8: slope = Δy/Δt
-                    let slope = if dt > 0.001 { dy / dt } else { 0.0 };
-                    ui.label(RichText::new(format!("{:.1}s | Δ{:.2} | {:.3}/s", dt, dy, slope)).color(self.col_accent()));
-                } else { ui.label(RichText::new("\u{2014}").color(self.col_accent())); }
-                if ui.button("Clear").clicked() { self.click_points.clear(); }
+
+                // "..." overflow menu — always visible, always contains Smooth + Volume + Clear Chart
+                ui.add_space(4.0);
+                ui.menu_button("...", |ui| {
+                    ui.set_min_width(200.0);
+                    ui.label(RichText::new("Smooth:").color(self.col_gray()));
+                    egui::ComboBox::from_id_source("cb_smo").selected_text(&self.chart_smooth_val).show_ui(ui, |ui| {
+                        for val in ["None", "SMA-5", "SMA-20", "EMA-Fast", "EMA-Slow", "DEMA", "Median-5", "Kalman", "Savitzky-Golay"] {
+                            ui.selectable_value(&mut self.chart_smooth_val, val.to_string(), val);
+                        }
+                    });
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("Volume unit:").color(self.col_gray()));
+                    egui::ComboBox::from_id_source("cb_volunit").selected_text(if self.vol_unit_ml { "mL" } else { "L" }).show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.vol_unit_ml, false, "L");
+                        ui.selectable_value(&mut self.vol_unit_ml, true, "mL");
+                    });
+                    ui.separator();
+                    if ui.button("Clear Chart").clicked() {
+                        self.p_buf.clear(); self.h_buf.clear();
+                        self.v_buf.clear(); self.f_buf.clear();
+                        self.click_points.clear();
+                        self.chart_cache_gen = self.chart_cache_gen.wrapping_add(1);
+                        ui.close_menu();
+                    }
+                    if !show_extras {
+                        ui.separator();
+                        if ui.button("Export CSV").on_hover_text("Export current chart data to CSV").clicked() {
+                            let fname = format!("chart_export_{}.csv", Local::now().format("%Y%m%d_%H%M%S"));
+                            if let Ok(mut f) = File::create(&fname) {
+                                let _ = writeln!(f, "Time(s),P(bar),H(mm),V(L),Flow(L/s)");
+                                let pts_p = self.p_buf.get_line_points();
+                                let pts_h = self.h_buf.get_line_points();
+                                let pts_v = self.v_buf.get_line_points();
+                                let pts_f = self.f_buf.get_line_points();
+                                let n = pts_p.len().min(pts_h.len()).min(pts_v.len()).min(pts_f.len());
+                                for i in 0..n {
+                                    let _ = writeln!(f, "{:.3},{:.5},{:.1},{:.2},{:.3}",
+                                        pts_p[i][0], pts_p[i][1], pts_h[i][1], pts_v[i][1], pts_f[i][1]);
+                                }
+                                self.show_toast(&format!("Chart exported: {}", fname));
+                            }
+                            ui.close_menu();
+                        }
+                        if ui.button("Reset Zoom").on_hover_text("Reset chart pan/zoom to fit all data").clicked() {
+                            self.reset_zoom = true;
+                            ui.close_menu();
+                        }
+                    }
+                    if !show_delta {
+                        ui.separator();
+                        ui.label(RichText::new("Delta:").color(self.col_gray()));
+                        if self.click_points.len() == 2 {
+                            let dt = (self.click_points[1][0] - self.click_points[0][0]).abs();
+                            let dy = self.click_points[1][1] - self.click_points[0][1];
+                            let slope = if dt > 0.001 { dy / dt } else { 0.0 };
+                            ui.label(RichText::new(format!("{:.1}s | Δ{:.2} | {:.3}/s", dt, dy, slope)).color(self.col_accent()));
+                        } else {
+                            ui.label(RichText::new("\u{2014}").color(self.col_accent()));
+                        }
+                        if ui.button("Clear Delta").clicked() { self.click_points.clear(); ui.close_menu(); }
+                    }
+                });
             });
             ui.add_space(4.0);
 
