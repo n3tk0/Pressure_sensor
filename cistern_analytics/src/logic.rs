@@ -563,3 +563,38 @@ mod tests {
         assert!(flags.iter().any(|f| f.contains("[INFO]") && f.to_lowercase().contains("temp")));
     }
 }
+
+#[cfg(test)]
+mod smooth_last_tests {
+    use super::*;
+
+    fn check(data: &[f64], alg: &str) {
+        let expected = smooth(data, alg).last().copied().unwrap_or(0.0);
+        let got = smooth_last(data, alg);
+        assert!((got - expected).abs() < 1e-9,
+            "alg={} expected={} got={}", alg, expected, got);
+    }
+
+    #[test]
+    fn smooth_last_matches_smooth_for_all_algorithms() {
+        let data: Vec<f64> = (0..50).map(|i| (i as f64).sin() * 100.0 + 200.0).collect();
+        for alg in ["None","SMA-5","SMA-20","EMA-Fast","EMA-Slow","DEMA","Median-5","Kalman","Savitzky-Golay"] {
+            check(&data, alg);
+        }
+    }
+
+    #[test]
+    fn smooth_last_short_slice() {
+        let data = vec![1.0, 2.0, 3.0];
+        for alg in ["SMA-5","SMA-20","EMA-Fast","EMA-Slow"] {
+            check(&data, alg);
+        }
+    }
+
+    #[test]
+    fn smooth_last_single_element() {
+        assert_eq!(smooth_last(&[42.0], "SMA-5"), 42.0);
+        assert_eq!(smooth_last(&[42.0], "EMA-Fast"), 42.0);
+        assert_eq!(smooth_last(&[], "SMA-5"), 0.0);
+    }
+}
