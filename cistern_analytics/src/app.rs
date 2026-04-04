@@ -1,5 +1,6 @@
 use crate::sensor::{SensorCore, SensorEvent};
-use crate::logic::{CisternProfile, CalibrationPoint, FlushResult, run_compliance_checks, smooth, smooth_last};
+use crate::logic::{CisternProfile, CalibrationPoint, FlushResult, CisternClass, CisternTypeVariant,
+                   run_compliance_checks, validate_flush, smooth, smooth_last};
 use eframe::egui;
 use egui::{Color32, RichText, Key, Modifiers};
 use egui_extras::{TableBuilder, Column};
@@ -40,6 +41,10 @@ struct AppSettings {
     /// false after wizard is completed once
     #[serde(default = "default_true")]
     first_run:       bool,
+    #[serde(default)]
+    cistern_class:   CisternClass,
+    #[serde(default)]
+    cistern_type_variant: CisternTypeVariant,
 }
 
 fn default_font_scale() -> f32 { 1.0 }
@@ -225,6 +230,12 @@ pub struct CisternApp {
     // Item 1: first-run guided wizard
     show_wizard: bool,
     wizard_step: usize,
+
+    // EN 14055 cistern class / type selection (persisted in settings)
+    cistern_class: CisternClass,
+    cistern_type_variant: CisternTypeVariant,
+    // Compliance result for the most-recently completed flush
+    last_compliance: Option<bool>,
 }
 
 impl CisternApp {
@@ -323,6 +334,9 @@ impl CisternApp {
             font_scale: 1.0,
             show_wizard: false,
             wizard_step: 0,
+            cistern_class: CisternClass::Class2,
+            cistern_type_variant: CisternTypeVariant::Max6_0,
+            last_compliance: None,
         }
     }
 
@@ -482,6 +496,8 @@ impl CisternApp {
             recent_profiles: self.recent_profiles.clone(),
             font_scale:      self.font_scale,
             first_run:       false, // mark wizard completed on first save
+            cistern_class:   self.cistern_class,
+            cistern_type_variant: self.cistern_type_variant,
         };
         let _ = std::fs::create_dir_all(&self.config_dir);
         let path = self.config_dir.join("settings.json");
@@ -514,6 +530,8 @@ impl CisternApp {
                 self.font_scale            = s.font_scale;
                 self.show_wizard           = s.first_run; // show on first-ever run
                 self.avg_window_s          = self.setting_avg_window.parse().unwrap_or(0.5);
+                self.cistern_class         = s.cistern_class;
+                self.cistern_type_variant  = s.cistern_type_variant;
             }
         }
         // Push loaded temp offset to sensor thread
@@ -1627,6 +1645,65 @@ impl eframe::App for CisternApp {
 
                     // 3. FLUSH TEST
                     egui::CollapsingHeader::new(RichText::new("FLUSH TEST (EN 14055)").strong()).default_open(true).show(ui, |ui| {
+                        // ── Cistern Class ──────────────────────────────────────────
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Cistern Class:").color(self.col_gray()));
+                            egui::ComboBox::from_id_source("cb_cistern_class")
+                                .selected_text(match self.cistern_class {
+                                    CisternClass::Class1 => "Class 1",
+                                    CisternClass::Class2 => "Class 2",
+                                })
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut self.cistern_class, CisternClass::Class2, "Class 2");
+                                    ui.selectable_value(&mut self.cistern_class, CisternClass::Class1, "Class 1");
+                                });
+                        });
+                        // Auto-correct variant when class changes to avoid cross-class mismatch
+                        match self.cistern_class {
+                            CisternClass::Class1 => {
+                                if matches!(self.cistern_type_variant,
+                                    CisternTypeVariant::Max6_0 | CisternTypeVariant::L4_5 | CisternTypeVariant::L4_0)
+                                { self.cistern_type_variant = CisternTypeVariant::Type6; }
+                            }
+                            CisternClass::Class2 => {
+                                if matches!(self.cistern_type_variant,
+                                    CisternTypeVariant::Type6 | CisternTypeVariant::Type5 | CisternTypeVariant::Type4)
+                                { self.cistern_type_variant = CisternTypeVariant::Max6_0; }
+                            }
+                        }
+                        // ── Cistern Type / Volume ───────────────────────────────────
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Type/Volume:").color(self.col_gray()));
+                            match self.cistern_class {
+                                CisternClass::Class1 => {
+                                    egui::ComboBox::from_id_source("cb_cistern_type")
+                                        .selected_text(match self.cistern_type_variant {
+                                            CisternTypeVariant::Type5 => "Type 5",
+                                            CisternTypeVariant::Type4 => "Type 4",
+                                            _                         => "Type 6",
+                                        })
+                                        .show_ui(ui, |ui| {
+                                            ui.selectable_value(&mut self.cistern_type_variant, CisternTypeVariant::Type6, "Type 6  (6.0–6.5 L full | 3.0–4.0 L part)");
+                                            ui.selectable_value(&mut self.cistern_type_variant, CisternTypeVariant::Type5, "Type 5  (4.5–5.5 L full | 3.0–4.0 L part)");
+                                            ui.selectable_value(&mut self.cistern_type_variant, CisternTypeVariant::Type4, "Type 4  (4.0–4.5 L full | 2.0–3.0 L part)");
+                                        });
+                                }
+                                CisternClass::Class2 => {
+                                    egui::ComboBox::from_id_source("cb_cistern_type")
+                                        .selected_text(match self.cistern_type_variant {
+                                            CisternTypeVariant::L4_5  => "4.5L",
+                                            CisternTypeVariant::L4_0  => "4.0L",
+                                            _                         => "Max 6.0L",
+                                        })
+                                        .show_ui(ui, |ui| {
+                                            ui.selectable_value(&mut self.cistern_type_variant, CisternTypeVariant::Max6_0, "Max 6.0L  (≤ 6.0 L)");
+                                            ui.selectable_value(&mut self.cistern_type_variant, CisternTypeVariant::L4_5,   "4.5L  (4.15–4.85 L)");
+                                            ui.selectable_value(&mut self.cistern_type_variant, CisternTypeVariant::L4_0,   "4.0L  (3.70–4.30 L)");
+                                        });
+                                }
+                            }
+                        });
+                        // ── Flush Type ─────────────────────────────────────────────
                         ui.horizontal(|ui| {
                             ui.label(RichText::new("Type:").color(self.col_gray()));
                             egui::ComboBox::from_id_source("cb_flush_type")
@@ -1651,9 +1728,23 @@ impl eframe::App for CisternApp {
                                     let en14055_rate = if vol_l > 3.0 && time_s > 0.0 {
                                         Some((vol_l - 3.0) / time_s)
                                     } else { None };
+                                    // EN 14055 volume compliance — Class 2 part flush needs the last full flush vol
+                                    let last_full_vol = self.flushes.iter().filter(|f| f.is_full).last().map(|f| f.vol_l);
+                                    let pass = validate_flush(
+                                        self.cistern_class,
+                                        self.cistern_type_variant,
+                                        !is_full,
+                                        vol_l,
+                                        last_full_vol,
+                                    );
+                                    self.last_compliance = Some(pass);
                                     // Item 7: VLine at the moment "Stop" was clicked
                                     self.flush_vlines.push((self.flush_pending_end_t, is_full));
-                                    self.flushes.push(FlushResult { is_full, vol_l, time_s, en14055_rate, temp_c: self.current_temp });
+                                    self.flushes.push(FlushResult {
+                                        is_full, vol_l, time_s, en14055_rate,
+                                        temp_c: self.current_temp,
+                                        compliance_pass: Some(pass),
+                                    });
                                 }
                                 if ui.button("Cancel").clicked() { self.stop_flush_confirm = false; }
                             });
@@ -1692,7 +1783,12 @@ impl eframe::App for CisternApp {
                                         row.col(|ui|{ ui.label(RichText::new(if f.is_full {"Full"} else {"Part"}).color(if f.is_full {self.col_accent()} else {self.col_orange()})); });
                                         row.col(|ui|{
                                             let vs = if self.vol_unit_ml { format!("{:.0}mL", f.vol_l * 1000.0) } else { format!("{:.1}L", f.vol_l) };
-                                            ui.label(vs);
+                                            let vol_col = match f.compliance_pass {
+                                                Some(true)  => self.col_green(),
+                                                Some(false) => self.col_red(),
+                                                None        => self.col_text(),
+                                            };
+                                            ui.label(RichText::new(vs).color(vol_col));
                                         });
                                         row.col(|ui|{ui.label(format!("{:.1}s", f.time_s));});
                                         row.col(|ui|{ui.label(format!("{:.2}", if f.time_s > 0.0 { f.vol_l / f.time_s } else { 0.0 }));});
@@ -1711,6 +1807,39 @@ impl eframe::App for CisternApp {
                                     if idx < self.flush_vlines.len() { self.flush_vlines.remove(idx); }
                                 }
                             });
+                        // ── Compliance Result indicator ────────────────────────────
+                        if let Some(pass) = self.last_compliance {
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("Last flush:").color(self.col_gray()));
+                                let (label, fill) = if pass {
+                                    ("  PASS  ", self.col_btn_success())
+                                } else {
+                                    ("  FAIL  ", self.col_btn_danger())
+                                };
+                                egui::Frame::none()
+                                    .fill(fill)
+                                    .rounding(egui::Rounding::same(4.0))
+                                    .inner_margin(egui::Margin::symmetric(4.0, 2.0))
+                                    .show(ui, |ui| {
+                                        ui.label(RichText::new(label).color(Color32::WHITE).strong());
+                                    });
+                                let class_str = match self.cistern_class {
+                                    CisternClass::Class1 => "Class 1",
+                                    CisternClass::Class2 => "Class 2",
+                                };
+                                let type_str = match self.cistern_type_variant {
+                                    CisternTypeVariant::Type6  => "Type 6",
+                                    CisternTypeVariant::Type5  => "Type 5",
+                                    CisternTypeVariant::Type4  => "Type 4",
+                                    CisternTypeVariant::Max6_0 => "Max 6L",
+                                    CisternTypeVariant::L4_5   => "4.5L",
+                                    CisternTypeVariant::L4_0   => "4.0L",
+                                };
+                                ui.label(RichText::new(format!("({} {})", class_str, type_str)).color(self.col_gray()));
+                            });
+                            ui.add_space(2.0);
+                        }
                         if !self.flushes.is_empty() {
                             ui.horizontal(|ui| {
                                 // Item 14: confirm before clearing all flushes
@@ -1720,6 +1849,7 @@ impl eframe::App for CisternApp {
                                         self.flushes.clear();
                                         self.flush_vlines.clear();
                                         self.clear_flushes_confirm = false;
+                                        self.last_compliance = None;
                                     }
                                     if ui.button("Cancel").clicked() { self.clear_flushes_confirm = false; }
                                 } else {
