@@ -210,6 +210,8 @@ pub struct CisternApp {
     vol_unit_ml: bool,
     // Item 19: CSV log size tracking for auto-rollover (10 MB)
     csv_bytes_written: u64,
+    // "Log last N minutes" window selector index (0=1, 1=2, 2=5, 3=10)
+    log_window_idx: usize,
     // Cached avg_window parsed value — updated on settings load/save
     avg_window_s: f64,
     // Chart display cache — avoids re-smoothing every frame
@@ -312,6 +314,7 @@ impl CisternApp {
             flush_vlines: Vec::new(),
             vol_unit_ml: false,
             csv_bytes_written: 0,
+            log_window_idx: 0,
             avg_window_s: 0.5,
             chart_cache_gen: 0,
             chart_cache_key: (usize::MAX, PlotMode::Height, String::new(), String::new()),
@@ -558,6 +561,40 @@ impl CisternApp {
             vis.widgets.active.bg_fill   = Color32::from_rgb(144, 151, 178);
         }
         ctx.set_visuals(vis);
+    }
+
+    /// Export the last `window_mins` minutes of ring-buffer data to a timestamped CSV file.
+    fn export_last_minutes(&mut self, window_mins: u32) {
+        let window_s = window_mins as f64 * 60.0;
+        let pts_p = self.p_buf.get_line_points();
+        let pts_h = self.h_buf.get_line_points();
+        let pts_v = self.v_buf.get_line_points();
+        let pts_f = self.f_buf.get_line_points();
+        let n = pts_p.len().min(pts_h.len()).min(pts_v.len()).min(pts_f.len());
+        if n == 0 { self.show_toast("No data in buffer."); return; }
+
+        let last_t = pts_p[n - 1][0];
+        let cutoff  = last_t - window_s;
+
+        let fname = format!("log_last{}min_{}.csv",
+            window_mins, Local::now().format("%Y%m%d_%H%M%S"));
+        match File::create(&fname) {
+            Ok(f) => {
+                let mut bw = std::io::BufWriter::new(f);
+                let _ = writeln!(bw, "Time(s),P(bar),H(mm),V(L),Flow(L/s)");
+                let mut rows = 0usize;
+                for i in 0..n {
+                    if pts_p[i][0] >= cutoff {
+                        let _ = writeln!(bw, "{:.3},{:.5},{:.1},{:.2},{:.3}",
+                            pts_p[i][0], pts_p[i][1],
+                            pts_h[i][1], pts_v[i][1], pts_f[i][1]);
+                        rows += 1;
+                    }
+                }
+                self.show_toast(&format!("Exported {} rows → {}", rows, fname));
+            }
+            Err(e) => self.show_toast(&format!("Export failed: {}", e)),
+        }
     }
 
     fn toggle_csv_log(&mut self) {
@@ -1706,6 +1743,7 @@ impl eframe::App for CisternApp {
 
                     // 4. DATA LOG
                     egui::CollapsingHeader::new(RichText::new("DATA LOG").strong()).default_open(true).show(ui, |ui| {
+                        // Continuous logging
                         let l_text = if self.is_logging { "Stop Data Log (CSV)" } else { "Start Data Log (CSV)" };
                         let l_col = if self.is_logging { self.col_btn_danger() } else { self.col_btn_success() };
                         if ui.add_sized([ui.available_width(), 26.0], egui::Button::new(RichText::new(l_text).color(Color32::WHITE)).fill(l_col)).clicked() {
@@ -1714,6 +1752,29 @@ impl eframe::App for CisternApp {
                         if self.is_logging {
                             ui.label(RichText::new("● Recording…").color(self.col_red()).size(12.0));
                         }
+
+                        ui.add_space(4.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+
+                        // Snapshot export: last 1 / 2 / 5 / 10 minutes from ring buffer
+                        ui.label(RichText::new("Export last:").color(self.col_gray()).size(12.0));
+                        ui.horizontal(|ui| {
+                            const WINDOWS: &[(&str, u32)] = &[("1 min", 1), ("2 min", 2), ("5 min", 5), ("10 min", 10)];
+                            egui::ComboBox::from_id_source("cb_log_win")
+                                .selected_text(WINDOWS[self.log_window_idx].0)
+                                .show_ui(ui, |ui| {
+                                    for (i, &(label, _)) in WINDOWS.iter().enumerate() {
+                                        ui.selectable_value(&mut self.log_window_idx, i, label);
+                                    }
+                                });
+                            let mins = WINDOWS[self.log_window_idx].1;
+                            if ui.button("💾 Save CSV").on_hover_text(
+                                format!("Export the last {} minute(s) of buffered data to a CSV file", mins)
+                            ).clicked() {
+                                self.export_last_minutes(mins);
+                            }
+                        });
                     });
 
                     // Toast notification
