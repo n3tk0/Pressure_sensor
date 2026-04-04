@@ -87,6 +87,11 @@ EN14055_FLUSH_MIN_DURATION_S: float = 3.0
 EN14055_FLUSH_RISE_THRESH_MM: float = 5.0
 EN14055_FLUSH_RISE_CONFIRM_S: float = 2.0
 EN14055_CWL_HISTORY_SAMPLES: int = 150
+# ARM auto-detect constants
+EN14055_ARM_DROP_THRESH_MM: float = 1.5   # height drop in rolling window to start RECORDING
+EN14055_ARM_DROP_WINDOW:    int   = 15    # samples in rolling window for drop detection
+EN14055_ARM_RISE_THRESH_MM: float = 2.0   # height rise above floor to start stop-confirmation
+EN14055_ARM_RISE_SAMPLES:   int   = 15    # consecutive above-floor samples → stop recording
 EN14055_MAX_CAL_FILE_BYTES: int = 10 * 1024 * 1024  # 10 MB import guard
 
 # ── Runtime base directory ───────────────────────────────────────────
@@ -442,15 +447,27 @@ class SensorApp:
         self.cwl_auto_timer = 0.0
 
         self._flush_lock = threading.Lock()
-        self.flush_measuring = False
-        self.flush_start_vol = 0.0
-        self.flush_start_h = 0.0
-        self.flush_start_time = 0.0
-        self.flush_results = []  # list of {type, vol, time, en14055_rate, temp_c}
-        self.flush_vol_history = []  # list of (timestamp, volume, height)
-        self.flush_min_h = float("inf")
-        self.flush_rising = False
-        self.flush_rising_timer = 0.0
+        # ARM state machine: "IDLE" → arm_flush() → "ARMED" → auto → "RECORDING" → auto → "IDLE"
+        self.flush_state: str = "IDLE"
+        self.flush_type: str = "Full Flush"
+        # Pre-recording circular buffer; holds samples before the drop is confirmed
+        self.flush_arm_buf: collections.deque = collections.deque(maxlen=20)
+        # Anchor point (retroactive local max before the drop)
+        self.flush_start_t: float = 0.0   # monotonic elapsed time
+        self.flush_start_v: float = 0.0   # volume at anchor
+        self.flush_start_h: float = 0.0   # height at anchor (local max)
+        # Recording buffer: list of (t, h, v) from start anchor to now
+        self.flush_record_buf: list = []
+        # Minimum height tracker during RECORDING
+        self.flush_min_h: float = float("inf")
+        self.flush_min_h_t: float = 0.0
+        self.flush_min_h_v: float = 0.0
+        # Consecutive samples above floor for stop-confirmation
+        self.flush_rising_count: int = 0
+        # Result list — UI reads this
+        self.flush_results: list = []  # list of {type, vol, time, en14055_rate, en14055_note, temp_c}
+        # Version counter incremented each time a new result is appended; UI uses it to detect new results
+        self.flush_results_version: int = 0
 
         self.click_points = []
         self.last_t = []
@@ -544,12 +561,8 @@ class SensorApp:
                                         self.v_buf.append(v)
                                         self.f_buf.append(f_rate)
 
-                                    if self.flush_measuring:
-                                        with self._flush_lock:
-                                            self.flush_vol_history.append(
-                                                (time.time(), v, h))
-                                            if h < self.flush_min_h:
-                                                self.flush_min_h = h
+                                    # ARM state machine — runs in sensor thread (no UI blocking)
+                                    self.tick_flush(t, h, v)
 
                                     with self._csv_lock:
                                         if self.is_logging and self.csv_writer:
@@ -719,6 +732,114 @@ class SensorApp:
                 return True
 
         return False
+
+    # ── ARM flush state machine ──────────────────────────────────────
+    def arm_flush(self, flush_type: str = "Full Flush") -> bool:
+        """UI calls this to arm the system. Returns False if already armed/recording."""
+        with self._flush_lock:
+            if self.flush_state != "IDLE":
+                return False
+            self.flush_type = flush_type
+            self.flush_arm_buf.clear()
+            self.flush_state = "ARMED"
+            return True
+
+    def cancel_flush(self):
+        """UI calls this to disarm or abort an in-progress recording."""
+        with self._flush_lock:
+            self.flush_state = "IDLE"
+            self.flush_arm_buf.clear()
+            self.flush_record_buf = []
+
+    def tick_flush(self, t: float, h: float, v: float):
+        """Called from sensor thread on every new sample.
+        Drives the ARMED→RECORDING→IDLE state machine without blocking.
+        t is monotonic elapsed seconds; h height mm; v volume L."""
+        with self._flush_lock:
+            if self.flush_state == "ARMED":
+                self.flush_arm_buf.append((t, h, v))
+                buf = list(self.flush_arm_buf)
+                if len(buf) >= 10:
+                    # Rolling window: check for sudden drop ≥ threshold
+                    win = buf[-EN14055_ARM_DROP_WINDOW:]
+                    win_h = [s[1] for s in win]
+                    peak = max(win_h)
+                    if peak - h >= EN14055_ARM_DROP_THRESH_MM:
+                        # Retroactively find the local-maximum sample
+                        peak_idx_in_win = win_h.index(peak)
+                        abs_start = len(buf) - len(win) + peak_idx_in_win
+                        start_s = buf[abs_start]
+                        self.flush_start_t = start_s[0]
+                        self.flush_start_h = start_s[1]
+                        self.flush_start_v = start_s[2]
+                        # Seed record_buf with everything from the local max forward
+                        self.flush_record_buf = list(buf[abs_start:])
+                        self.flush_min_h   = min(s[1] for s in self.flush_record_buf)
+                        self.flush_min_h_t = self.flush_record_buf[-1][0]
+                        self.flush_min_h_v = self.flush_record_buf[-1][2]
+                        self.flush_rising_count = 0
+                        self.flush_state = "RECORDING"
+
+            elif self.flush_state == "RECORDING":
+                self.flush_record_buf.append((t, h, v))
+                if h < self.flush_min_h:
+                    # New floor — reset confirmation counter
+                    self.flush_min_h   = h
+                    self.flush_min_h_t = t
+                    self.flush_min_h_v = v
+                    self.flush_rising_count = 0
+                elif h > self.flush_min_h + EN14055_ARM_RISE_THRESH_MM:
+                    self.flush_rising_count += 1
+                else:
+                    self.flush_rising_count = 0
+
+                elapsed = t - self.flush_start_t
+                if (elapsed >= EN14055_FLUSH_MIN_DURATION_S and
+                        self.flush_rising_count >= EN14055_ARM_RISE_SAMPLES):
+                    self._finish_flush()
+
+    def _finish_flush(self):
+        """Compute result and append to flush_results. Must be called with _flush_lock held."""
+        start_v = self.flush_start_v
+        end_v   = self.flush_min_h_v
+        time_s  = self.flush_min_h_t - self.flush_start_t
+        delta_vol = abs(start_v - end_v)
+        temp_c  = self.current_temperature  # snapshot (not lock-protected but only read)
+
+        en14055_rate = None
+        en14055_note = None
+        if delta_vol > 3.0 and len(self.flush_record_buf) > 2:
+            v_skip_start = start_v - 1.0          # skip first 1 L
+            v_skip_end   = end_v   + 2.0           # skip last 2 L
+            t1 = next((s[0] for s in self.flush_record_buf if s[2] <= v_skip_start), None)
+            t2 = next((s[0] for s in self.flush_record_buf if s[2] <= v_skip_end),   None)
+            if t1 is not None and t2 is not None and t2 > t1:
+                eff_vol  = v_skip_start - v_skip_end
+                eff_time = t2 - t1
+                if eff_time > 0 and eff_vol > 0:
+                    en14055_rate = eff_vol / eff_time
+                    en14055_note = "Excl. first 1 L and last 2 L (V2 method)"
+                else:
+                    en14055_note = "N/A (flush window too short)"
+            else:
+                en14055_note = "N/A (flush too short for skip-window)"
+
+        self.flush_results.append({
+            "type":          self.flush_type,
+            "vol":           delta_vol,
+            "time":          max(time_s, 0.001),
+            "en14055_rate":  en14055_rate,
+            "en14055_note":  en14055_note,
+            "temp_c":        temp_c,
+        })
+        self.flush_results_version += 1
+
+        # Reset state
+        self.flush_state = "IDLE"
+        self.flush_arm_buf.clear()
+        self.flush_record_buf = []
+        self.flush_rising_count = 0
+        self.flush_min_h = float("inf")
 
     def cleanup(self):
         save_settings(self.conn_params, self.app_settings)
