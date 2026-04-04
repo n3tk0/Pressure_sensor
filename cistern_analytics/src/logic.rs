@@ -217,7 +217,8 @@ pub fn smooth(data: &[f64], alg: &str) -> Vec<f64> {
     if alg.starts_with("SMA") {
         let w: usize = alg.split('-').nth(1)
             .and_then(|s| s.parse().ok())
-            .unwrap_or(5);
+            .unwrap_or(5)
+            .max(1); // guard: SMA-0 would cause divide-by-zero
         let mut r = Vec::with_capacity(n);
         let mut window_sum = 0.0_f64;
         for i in 0..n {
@@ -326,6 +327,7 @@ pub fn smooth_last(data: &[f64], alg: &str) -> f64 {
         let w: usize = alg.split('-').nth(1)
             .and_then(|s| s.parse().ok())
             .unwrap_or(5)
+            .max(1)  // guard: SMA-0 would cause divide-by-zero
             .min(n);
         return data[n - w..].iter().sum::<f64>() / w as f64;
     }

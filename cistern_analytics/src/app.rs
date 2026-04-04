@@ -217,7 +217,7 @@ pub struct CisternApp {
     // Chart display cache — avoids re-smoothing every frame
     chart_cache_gen: usize,
     chart_cache_key: (usize, PlotMode, String, String), // (gen, mode, window, smooth)
-    display_pts_cache: Vec<[f64; 2]>,
+    display_pts_cache: Vec<egui_plot::PlotPoint>,
     // Item 6: recently used profile paths (persisted in settings)
     recent_profiles: Vec<String>,
     // Item 20: UI font scale factor
@@ -583,15 +583,24 @@ impl CisternApp {
                 let mut bw = std::io::BufWriter::new(f);
                 let _ = writeln!(bw, "Time(s),P(bar),H(mm),V(L),Flow(L/s)");
                 let mut rows = 0usize;
+                let mut write_err = false;
                 for i in 0..n {
                     if pts_p[i][0] >= cutoff {
-                        let _ = writeln!(bw, "{:.3},{:.5},{:.1},{:.2},{:.3}",
+                        if writeln!(bw, "{:.3},{:.5},{:.1},{:.2},{:.3}",
                             pts_p[i][0], pts_p[i][1],
-                            pts_h[i][1], pts_v[i][1], pts_f[i][1]);
+                            pts_h[i][1], pts_v[i][1], pts_f[i][1]).is_err()
+                        {
+                            write_err = true;
+                            break;
+                        }
                         rows += 1;
                     }
                 }
-                self.show_toast(&format!("Exported {} rows → {}", rows, fname));
+                if write_err {
+                    self.show_toast(&format!("⚠ Write error after {} rows — disk full?", rows));
+                } else {
+                    self.show_toast(&format!("Exported {} rows → {}", rows, fname));
+                }
             }
             Err(e) => self.show_toast(&format!("Export failed: {}", e)),
         }
@@ -1835,7 +1844,12 @@ impl eframe::App for CisternApp {
                         self.show_toast(&format!("Chart exported: {}", fname));
                     }
                 }
-                if ui.button("Clear Chart").clicked() { self.p_buf.clear(); self.h_buf.clear(); self.v_buf.clear(); self.f_buf.clear(); self.click_points.clear(); }
+                if ui.button("Clear Chart").clicked() {
+                    self.p_buf.clear(); self.h_buf.clear();
+                    self.v_buf.clear(); self.f_buf.clear();
+                    self.click_points.clear();
+                    self.chart_cache_gen = self.chart_cache_gen.wrapping_add(1); // invalidate display cache
+                }
                 // Item 15: zoom reset
                 if ui.button("⟳ Reset Zoom").on_hover_text("Reset chart pan/zoom to fit all data").clicked() {
                     self.reset_zoom = true;
@@ -1886,11 +1900,18 @@ impl eframe::App for CisternApp {
                 self.display_pts_cache = if self.chart_smooth_val != "None" && windowed_pts.len() > 1 {
                     let ys: Vec<f64> = windowed_pts.iter().map(|p| p[1]).collect();
                     let smoothed = smooth(&ys, &self.chart_smooth_val);
-                    windowed_pts.iter().zip(smoothed.iter()).map(|(p, &sy)| [p[0], sy]).collect()
-                } else { windowed_pts };
+                    windowed_pts.iter().zip(smoothed.iter())
+                        .map(|(p, &sy)| egui_plot::PlotPoint::new(p[0], sy))
+                        .collect()
+                } else {
+                    windowed_pts.into_iter()
+                        .map(|p| egui_plot::PlotPoint::new(p[0], p[1]))
+                        .collect()
+                };
             }
 
-            let line = Line::new(self.display_pts_cache.clone()).color(self.color_sensor).width(1.5).name("Sensor");
+            let line = Line::new(egui_plot::PlotPoints::Owned(self.display_pts_cache.clone()))
+                .color(self.color_sensor).width(1.5).name("Sensor");
 
             let plot_bg = if self.is_dark_mode { Color32::from_rgb(25, 25, 40) } else { Color32::from_rgb(248, 249, 252) };
             let grid_col = if self.is_dark_mode { Color32::from_rgb(60, 60, 80) } else { Color32::from_rgb(200, 204, 215) };
