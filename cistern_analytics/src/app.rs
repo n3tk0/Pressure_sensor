@@ -18,6 +18,30 @@ use serde::{Serialize, Deserialize};
 #[derive(PartialEq, Clone, Debug)]
 enum AutoState { Idle, Armed, Waiting, Done }
 
+/// Flush ARM auto-detection phases.
+#[derive(PartialEq, Clone, Copy, Debug)]
+enum FlushPhase {
+    Idle,
+    /// Armed waiting for full flush drop to be detected
+    ArmedFull,
+    /// Actively recording the full flush
+    RecordingFull,
+    /// Full flush recorded; waiting for user to arm the part flush
+    PendingPart,
+    /// Armed waiting for part flush drop to be detected
+    ArmedPart,
+    /// Actively recording the part flush
+    RecordingPart,
+}
+
+// ARM auto-detect tuning constants (same as Python)
+const FLUSH_ARM_DROP_THRESH_MM: f64 = 1.5;  // mm drop in rolling window to trigger start
+const FLUSH_ARM_DROP_WINDOW: usize = 15;     // samples in drop-detection rolling window
+const FLUSH_ARM_RISE_THRESH_MM: f64 = 2.0;  // mm above floor to count as "rising"
+const FLUSH_ARM_RISE_SAMPLES: u32  = 15;    // consecutive rising samples needed to auto-stop
+const FLUSH_ARM_MIN_DURATION_S: f64 = 3.0;  // minimum flush duration before auto-stop eligible
+const FLUSH_ARM_PRE_BUF: usize = 20;        // pre-trigger rolling buffer size
+
 /// Typed settings struct — serialised to/from settings.json.
 #[derive(Serialize, Deserialize, Clone)]
 struct AppSettings {
@@ -156,12 +180,22 @@ pub struct CisternApp {
     flush_pairs: Vec<FlushPair>,
     // Full-flush result held here while waiting for the subsequent part flush
     flush_pending_full: Option<FlushResult>,
-    is_flushing: bool,
-    flush_start_vol: f64,
-    flush_start_time: f64,
-    // Snapshot captured at the moment "Stop" is clicked (before confirmation dialog)
-    flush_pending_end_vol: f64,
-    flush_pending_end_t: f64,
+
+    // ARM auto-detection state
+    flush_phase: FlushPhase,
+    /// Pre-trigger circular buffer: [t, h, v]
+    flush_arm_buf: std::collections::VecDeque<[f64; 3]>,
+    /// In-progress recording buffer: [t, h, v]
+    flush_record_buf: Vec<[f64; 3]>,
+    /// Time/vol at retroactive start anchor
+    flush_arm_start_t: f64,
+    flush_arm_start_v: f64,
+    /// Running floor (minimum height seen since recording began)
+    flush_arm_min_h: f64,
+    flush_arm_min_t: f64,
+    flush_arm_min_v: f64,
+    /// Consecutive samples ≥ RISE_THRESH above floor
+    flush_arm_rising: u32,
     
     compliance_results: Vec<String>,
     
@@ -209,8 +243,6 @@ pub struct CisternApp {
     last_fault_at: Option<Instant>,
     // Item 14: "Clear All" confirmation guard
     clear_flushes_confirm: bool,
-    // Item 4: "Stop Flush" confirmation guard
-    stop_flush_confirm: bool,
     // Item 15: one-shot zoom reset flag
     reset_zoom: bool,
     // Item 7: flush event markers (time_s, is_full_flush)
@@ -291,11 +323,15 @@ impl CisternApp {
             is_logging: false,
             flush_pairs: Vec::new(),
             flush_pending_full: None,
-            is_flushing: false,
-            flush_start_vol: 0.0,
-            flush_start_time: 0.0,
-            flush_pending_end_vol: 0.0,
-            flush_pending_end_t: 0.0,
+            flush_phase: FlushPhase::Idle,
+            flush_arm_buf: std::collections::VecDeque::with_capacity(FLUSH_ARM_PRE_BUF + 4),
+            flush_record_buf: Vec::new(),
+            flush_arm_start_t: 0.0,
+            flush_arm_start_v: 0.0,
+            flush_arm_min_h: f64::INFINITY,
+            flush_arm_min_t: 0.0,
+            flush_arm_min_v: 0.0,
+            flush_arm_rising: 0,
             compliance_results: Vec::new(),
             current_p: 0.0, current_h: 0.0, current_v: 0.0, current_f: 0.0, current_temp: None,
             sensor_status_text: "--".to_string(),
@@ -322,7 +358,6 @@ impl CisternApp {
             last_fault_text: String::new(),
             last_fault_at: None,
             clear_flushes_confirm: false,
-            stop_flush_confirm: false,
             reset_zoom: false,
             flush_vlines: Vec::new(),
             vol_unit_ml: false,
@@ -1031,6 +1066,152 @@ impl CisternApp {
         self.show_program_modal = is_open;
     }
 
+    // ── Flush ARM auto-detection ──────────────────────────────────────────
+
+    /// Called on every sensor data sample while a flush phase is active.
+    fn tick_flush_arm(&mut self, t: f64, h: f64, v: f64) {
+        match self.flush_phase {
+            FlushPhase::ArmedFull | FlushPhase::ArmedPart => {
+                // Fill pre-trigger rolling buffer
+                self.flush_arm_buf.push_back([t, h, v]);
+                if self.flush_arm_buf.len() > FLUSH_ARM_PRE_BUF {
+                    self.flush_arm_buf.pop_front();
+                }
+                let len = self.flush_arm_buf.len();
+                if len < 10 { return; }
+
+                // Detect drop within rolling window
+                let win_start = len.saturating_sub(FLUSH_ARM_DROP_WINDOW);
+                let peak_h = self.flush_arm_buf.iter().skip(win_start)
+                    .map(|s| s[1]).fold(f64::NEG_INFINITY, f64::max);
+                if peak_h - h >= FLUSH_ARM_DROP_THRESH_MM {
+                    // Find retroactive local-max in window as anchor
+                    let anchor = self.flush_arm_buf.iter().skip(win_start)
+                        .max_by(|a, b| a[1].partial_cmp(&b[1]).unwrap_or(std::cmp::Ordering::Equal))
+                        .copied()
+                        .unwrap_or([t, h, v]);
+
+                    self.flush_arm_start_t = anchor[0];
+                    self.flush_arm_start_v = anchor[2];
+                    self.flush_arm_min_h   = h;
+                    self.flush_arm_min_t   = t;
+                    self.flush_arm_min_v   = v;
+                    self.flush_arm_rising  = 0;
+
+                    // Seed record buffer from pre-trigger buf from anchor onwards
+                    self.flush_record_buf.clear();
+                    for s in &self.flush_arm_buf {
+                        if s[0] >= anchor[0] {
+                            self.flush_record_buf.push(*s);
+                        }
+                    }
+
+                    self.flush_phase = match self.flush_phase {
+                        FlushPhase::ArmedFull => FlushPhase::RecordingFull,
+                        FlushPhase::ArmedPart => FlushPhase::RecordingPart,
+                        _ => unreachable!(),
+                    };
+                }
+            }
+            FlushPhase::RecordingFull | FlushPhase::RecordingPart => {
+                self.flush_record_buf.push([t, h, v]);
+
+                // Update running floor
+                if h < self.flush_arm_min_h {
+                    self.flush_arm_min_h  = h;
+                    self.flush_arm_min_t  = t;
+                    self.flush_arm_min_v  = v;
+                    self.flush_arm_rising = 0;
+                } else if h > self.flush_arm_min_h + FLUSH_ARM_RISE_THRESH_MM {
+                    self.flush_arm_rising += 1;
+                } else {
+                    self.flush_arm_rising = 0;
+                }
+
+                let elapsed = t - self.flush_arm_start_t;
+                let is_full = self.flush_phase == FlushPhase::RecordingFull;
+                if elapsed >= FLUSH_ARM_MIN_DURATION_S && self.flush_arm_rising >= FLUSH_ARM_RISE_SAMPLES {
+                    self.finish_flush_recording(is_full);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Called when the ARM detector decides the flush is complete.
+    fn finish_flush_recording(&mut self, is_full: bool) {
+        if self.flush_record_buf.is_empty() { return; }
+
+        let start_t = self.flush_arm_start_t;
+        let start_v = self.flush_arm_start_v;
+        // Use floor point as end (lowest height = highest vol consumed)
+        let end_t = self.flush_arm_min_t;
+        let end_v = self.flush_arm_min_v;
+
+        let vol_l  = (start_v - end_v).abs();
+        let time_s = (end_t - start_t).abs();
+
+        // EN 14055 V2: skip first 1L and last 2L from rate window
+        let v_skip_start = start_v - 1.0;  // volume after removing first 1L consumed
+        let v_skip_end   = end_v   + 2.0;  // volume before last 2L consumed
+        let t1 = self.flush_record_buf.iter()
+            .find(|s| s[2] <= v_skip_start)
+            .map(|s| s[0]);
+        let t2 = self.flush_record_buf.iter()
+            .find(|s| s[2] <= v_skip_end)
+            .map(|s| s[0]);
+        let en14055_rate = match (t1, t2) {
+            (Some(ta), Some(tb)) if tb > ta && (v_skip_start - v_skip_end) > 0.0 => {
+                Some((v_skip_start - v_skip_end) / (tb - ta))
+            }
+            _ => if vol_l > 3.0 && time_s > 0.0 { Some((vol_l - 3.0) / time_s) } else { None },
+        };
+
+        let t_now = self.flush_arm_min_t;
+        self.flush_vlines.push((t_now, is_full));
+
+        if is_full {
+            let pass = validate_flush(
+                self.cistern_class, self.cistern_type_variant,
+                false, vol_l, None,
+            );
+            self.flush_pending_full = Some(FlushResult {
+                is_full: true, vol_l, time_s, en14055_rate,
+                temp_c: self.current_temp,
+                compliance_pass: Some(pass),
+            });
+            self.flush_phase = FlushPhase::PendingPart;
+        } else {
+            if let Some(full) = self.flush_pending_full.take() {
+                let part_pass = validate_flush(
+                    self.cistern_class, self.cistern_type_variant,
+                    true, vol_l, Some(full.vol_l),
+                );
+                let part = FlushResult {
+                    is_full: false, vol_l, time_s, en14055_rate,
+                    temp_c: self.current_temp,
+                    compliance_pass: Some(part_pass),
+                };
+                self.flush_pairs.push(FlushPair { full, part });
+            }
+            self.flush_phase = FlushPhase::PendingPart; // ready for next pair
+        }
+
+        // Reset ARM fields
+        self.flush_arm_buf.clear();
+        self.flush_record_buf.clear();
+        self.flush_arm_rising = 0;
+    }
+
+    /// Cancel any active ARM phase and return to Idle.
+    fn cancel_flush_arm(&mut self) {
+        self.flush_phase = FlushPhase::Idle;
+        self.flush_arm_buf.clear();
+        self.flush_record_buf.clear();
+        self.flush_pending_full = None;
+        self.flush_arm_rising = 0;
+    }
+
     /// Item 1: 4-step guided setup wizard shown on first run.
     fn draw_wizard(&mut self, ctx: &egui::Context) {
         if !self.show_wizard { return; }
@@ -1257,6 +1438,9 @@ impl eframe::App for CisternApp {
                             self.show_toast("Residual WL captured.");
                         }
                     }
+
+                    // Flush ARM auto-detection tick
+                    self.tick_flush_arm(pt.time_s, pt.height_mm, pt.volume_l);
 
                     if self.is_logging {
                         // Item 19: auto-rollover at 10 MB
@@ -1705,107 +1889,136 @@ impl eframe::App for CisternApp {
                                 }
                             }
                         });
-                        // ── Measurement state machine ──────────────────────────────
-                        // Phase A: no pending full flush → start full flush
-                        // Phase B: full flush done, waiting for part flush
-                        // Stop confirmation fires mid-flight in both phases
-                        if self.stop_flush_confirm {
-                            let phase_full = self.flush_pending_full.is_none();
-                            let phase_str  = if phase_full { "full" } else { "part" };
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new(format!("Stop and save this {} flush?", phase_str)).color(self.col_orange()));
-                                if ui.button("Yes, Stop").clicked() {
-                                    self.stop_flush_confirm = false;
-                                    self.is_flushing = false;
-                                    let vol_l  = (self.flush_start_vol - self.flush_pending_end_vol).abs();
-                                    let time_s = (self.flush_pending_end_t - self.flush_start_time).abs();
-                                    let en14055_rate = if vol_l > 3.0 && time_s > 0.0 {
-                                        Some((vol_l - 3.0) / time_s)
-                                    } else { None };
-                                    self.flush_vlines.push((self.flush_pending_end_t, phase_full));
-
-                                    if phase_full {
-                                        // — Full flush complete; compute compliance and park it
-                                        let pass = validate_flush(
-                                            self.cistern_class, self.cistern_type_variant,
-                                            false, vol_l, None,
-                                        );
-                                        self.flush_pending_full = Some(FlushResult {
-                                            is_full: true, vol_l, time_s, en14055_rate,
-                                            temp_c: self.current_temp,
-                                            compliance_pass: Some(pass),
-                                        });
-                                    } else {
-                                        // — Part flush complete; pair with stored full flush
-                                        if let Some(full) = self.flush_pending_full.take() {
-                                            let part_pass = validate_flush(
-                                                self.cistern_class, self.cistern_type_variant,
-                                                true, vol_l, Some(full.vol_l),
-                                            );
-                                            let part = FlushResult {
-                                                is_full: false, vol_l, time_s, en14055_rate,
-                                                temp_c: self.current_temp,
-                                                compliance_pass: Some(part_pass),
-                                            };
-                                            self.flush_pairs.push(FlushPair { full, part });
-                                        }
-                                    }
-                                }
-                                if ui.button("Cancel").clicked() { self.stop_flush_confirm = false; }
-                            });
-                        } else if let Some(ref pf) = self.flush_pending_full.clone() {
-                            // Phase B: full flush is parked, waiting for part flush
-                            let full_pass = pf.compliance_pass.unwrap_or(false);
-                            let full_col  = if full_pass { self.col_green() } else { self.col_red() };
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new("Full:").color(self.col_gray()));
-                                let fv = if self.vol_unit_ml { format!("{:.0}mL", pf.vol_l * 1000.0) } else { format!("{:.2}L", pf.vol_l) };
-                                ui.label(RichText::new(fv).color(full_col).strong());
-                                ui.label(RichText::new(format!("{:.1}s", pf.time_s)).color(self.col_gray()));
-                                let badge = if full_pass { "PASS" } else { "FAIL" };
-                                egui::Frame::none()
-                                    .fill(if full_pass { self.col_btn_success() } else { self.col_btn_danger() })
-                                    .rounding(egui::Rounding::same(3.0))
-                                    .inner_margin(egui::Margin::symmetric(4.0, 1.0))
-                                    .show(ui, |ui| { ui.label(RichText::new(badge).color(Color32::WHITE).small()); });
-                                if ui.small_button("Discard").clicked() {
-                                    self.flush_pending_full = None;
-                                }
-                            });
-                            if !self.is_flushing {
-                                let btn = egui::Button::new(RichText::new("Start Part Flush").color(Color32::WHITE))
-                                    .fill(self.col_accent());
+                        // ── Flush ARM state machine UI ────────────────────────────
+                        match self.flush_phase {
+                            FlushPhase::Idle => {
+                                // Ready to arm for full flush
+                                let btn = egui::Button::new(
+                                    RichText::new("ARM Full Flush").color(Color32::WHITE)
+                                ).fill(self.col_btn_success());
                                 if ui.add_sized([ui.available_width(), 26.0], btn).clicked() {
-                                    self.is_flushing = true;
-                                    self.flush_start_vol  = self.v_buf.last_y().unwrap_or(0.0);
-                                    self.flush_start_time = self.v_buf.last_x().unwrap_or(0.0);
-                                }
-                            } else {
-                                let btn = egui::Button::new(RichText::new("Stop Part Flush").color(Color32::WHITE))
-                                    .fill(self.col_btn_danger());
-                                if ui.add_sized([ui.available_width(), 26.0], btn).clicked() {
-                                    self.flush_pending_end_vol = self.v_buf.last_y().unwrap_or(0.0);
-                                    self.flush_pending_end_t   = self.v_buf.last_x().unwrap_or(0.0);
-                                    self.stop_flush_confirm = true;
+                                    self.flush_arm_buf.clear();
+                                    self.flush_record_buf.clear();
+                                    self.flush_phase = FlushPhase::ArmedFull;
+                                    self.show_toast("Full flush armed — flush the cistern now.");
                                 }
                             }
-                        } else {
-                            // Phase A: ready to start full flush
-                            let (btn_text, btn_fill) = if self.is_flushing {
-                                ("Stop Full Flush", self.col_btn_danger())
-                            } else {
-                                ("Start Full Flush", self.col_btn_success())
-                            };
-                            let btn = egui::Button::new(RichText::new(btn_text).color(Color32::WHITE)).fill(btn_fill);
-                            if ui.add_sized([ui.available_width(), 26.0], btn).clicked() {
-                                if !self.is_flushing {
-                                    self.is_flushing = true;
-                                    self.flush_start_vol  = self.v_buf.last_y().unwrap_or(0.0);
-                                    self.flush_start_time = self.v_buf.last_x().unwrap_or(0.0);
+                            FlushPhase::ArmedFull => {
+                                ui.horizontal(|ui| {
+                                    let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                                    ui.painter().circle_filled(rect.center(), 5.0, self.col_orange());
+                                    ui.label(RichText::new("ARMED — waiting for full flush drop…").color(self.col_orange()));
+                                });
+                                let btn = egui::Button::new(
+                                    RichText::new("Cancel ARM").color(Color32::WHITE)
+                                ).fill(self.col_btn_danger());
+                                if ui.add_sized([ui.available_width(), 22.0], btn).clicked() {
+                                    self.cancel_flush_arm();
+                                }
+                            }
+                            FlushPhase::RecordingFull => {
+                                let elapsed = self.flush_record_buf.last()
+                                    .map(|s| s[0] - self.flush_arm_start_t)
+                                    .unwrap_or(0.0);
+                                ui.horizontal(|ui| {
+                                    let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                                    ui.painter().circle_filled(rect.center(), 5.0, self.col_green());
+                                    ui.label(RichText::new(
+                                        format!("RECORDING full flush… {:.1}s  rise:{}/{}",
+                                            elapsed, self.flush_arm_rising, FLUSH_ARM_RISE_SAMPLES)
+                                    ).color(self.col_green()));
+                                });
+                                let btn = egui::Button::new(
+                                    RichText::new("Cancel").color(Color32::WHITE)
+                                ).fill(self.col_btn_danger());
+                                if ui.add_sized([ui.available_width(), 22.0], btn).clicked() {
+                                    self.cancel_flush_arm();
+                                }
+                            }
+                            FlushPhase::PendingPart => {
+                                // Full flush done — show result and offer ARM for part flush
+                                if let Some(ref pf) = self.flush_pending_full.clone() {
+                                    let full_pass = pf.compliance_pass.unwrap_or(false);
+                                    let full_col  = if full_pass { self.col_green() } else { self.col_red() };
+                                    ui.horizontal(|ui| {
+                                        ui.label(RichText::new("Full:").color(self.col_gray()));
+                                        let fv = if self.vol_unit_ml {
+                                            format!("{:.0}mL", pf.vol_l * 1000.0)
+                                        } else {
+                                            format!("{:.2}L", pf.vol_l)
+                                        };
+                                        ui.label(RichText::new(fv).color(full_col).strong());
+                                        ui.label(RichText::new(format!("{:.1}s", pf.time_s)).color(self.col_gray()));
+                                        let badge = if full_pass { "PASS" } else { "FAIL" };
+                                        egui::Frame::none()
+                                            .fill(if full_pass { self.col_btn_success() } else { self.col_btn_danger() })
+                                            .rounding(egui::Rounding::same(3.0))
+                                            .inner_margin(egui::Margin::symmetric(4.0, 1.0))
+                                            .show(ui, |ui| {
+                                                ui.label(RichText::new(badge).color(Color32::WHITE).small());
+                                            });
+                                        if ui.small_button("Discard").clicked() {
+                                            self.cancel_flush_arm();
+                                        }
+                                    });
+                                    let btn = egui::Button::new(
+                                        RichText::new("ARM Part Flush").color(Color32::WHITE)
+                                    ).fill(self.col_accent());
+                                    if ui.add_sized([ui.available_width(), 26.0], btn).clicked() {
+                                        self.flush_arm_buf.clear();
+                                        self.flush_record_buf.clear();
+                                        self.flush_phase = FlushPhase::ArmedPart;
+                                        self.show_toast("Part flush armed — flush the cistern now.");
+                                    }
                                 } else {
-                                    self.flush_pending_end_vol = self.v_buf.last_y().unwrap_or(0.0);
-                                    self.flush_pending_end_t   = self.v_buf.last_x().unwrap_or(0.0);
-                                    self.stop_flush_confirm = true;
+                                    // Part flush just completed — offer ARM for next pair
+                                    let btn = egui::Button::new(
+                                        RichText::new("ARM Next Full Flush").color(Color32::WHITE)
+                                    ).fill(self.col_btn_success());
+                                    if ui.add_sized([ui.available_width(), 26.0], btn).clicked() {
+                                        self.flush_arm_buf.clear();
+                                        self.flush_record_buf.clear();
+                                        self.flush_phase = FlushPhase::ArmedFull;
+                                        self.show_toast("Full flush armed — flush the cistern now.");
+                                    }
+                                    let done_btn = egui::Button::new(
+                                        RichText::new("Done Testing").color(Color32::WHITE)
+                                    ).fill(self.col_gray());
+                                    if ui.add_sized([ui.available_width(), 22.0], done_btn).clicked() {
+                                        self.flush_phase = FlushPhase::Idle;
+                                    }
+                                }
+                            }
+                            FlushPhase::ArmedPart => {
+                                ui.horizontal(|ui| {
+                                    let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                                    ui.painter().circle_filled(rect.center(), 5.0, self.col_orange());
+                                    ui.label(RichText::new("ARMED — waiting for part flush drop…").color(self.col_orange()));
+                                });
+                                let btn = egui::Button::new(
+                                    RichText::new("Cancel ARM").color(Color32::WHITE)
+                                ).fill(self.col_btn_danger());
+                                if ui.add_sized([ui.available_width(), 22.0], btn).clicked() {
+                                    self.flush_phase = FlushPhase::PendingPart; // keep full result
+                                }
+                            }
+                            FlushPhase::RecordingPart => {
+                                let elapsed = self.flush_record_buf.last()
+                                    .map(|s| s[0] - self.flush_arm_start_t)
+                                    .unwrap_or(0.0);
+                                ui.horizontal(|ui| {
+                                    let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                                    ui.painter().circle_filled(rect.center(), 5.0, self.col_green());
+                                    ui.label(RichText::new(
+                                        format!("RECORDING part flush… {:.1}s  rise:{}/{}",
+                                            elapsed, self.flush_arm_rising, FLUSH_ARM_RISE_SAMPLES)
+                                    ).color(self.col_green()));
+                                });
+                                let btn = egui::Button::new(
+                                    RichText::new("Cancel").color(Color32::WHITE)
+                                ).fill(self.col_btn_danger());
+                                if ui.add_sized([ui.available_width(), 22.0], btn).clicked() {
+                                    self.flush_phase = FlushPhase::PendingPart; // keep full result
                                 }
                             }
                         }
