@@ -150,6 +150,9 @@ pub struct CisternApp {
     is_flushing: bool,
     flush_start_vol: f64,
     flush_start_time: f64,
+    // Snapshot captured at the moment "Stop" is clicked (before confirmation dialog)
+    flush_pending_end_vol: f64,
+    flush_pending_end_t: f64,
     
     compliance_results: Vec<String>,
     
@@ -270,6 +273,8 @@ impl CisternApp {
             is_flushing: false,
             flush_start_vol: 0.0,
             flush_start_time: 0.0,
+            flush_pending_end_vol: 0.0,
+            flush_pending_end_t: 0.0,
             compliance_results: Vec::new(),
             current_p: 0.0, current_h: 0.0, current_v: 0.0, current_f: 0.0, current_temp: None,
             sensor_status_text: "--".to_string(),
@@ -549,18 +554,24 @@ impl CisternApp {
             self.is_logging = false;
             if let Some(mut f) = self.csv_file.take() { let _ = f.flush(); }
         } else {
-            self.open_new_csv_segment();
+            if !self.open_new_csv_segment() {
+                self.show_toast("⚠ Could not create CSV log file.");
+            }
         }
     }
 
-    /// Open a fresh CSV segment (used on start and on 10 MB rollover).
-    fn open_new_csv_segment(&mut self) {
+    /// Open a fresh CSV segment (used on start and on 10 MB rollover). Returns true on success.
+    fn open_new_csv_segment(&mut self) -> bool {
         let fname = format!("EN14055_Record_{}.csv", Local::now().format("%Y%m%d_%H%M%S"));
-        if let Ok(mut f) = File::create(&fname) {
-            let _ = writeln!(f, "Time(s),P(bar),H(mm),V(L),Flow(L/s),Temp(C)");
-            self.csv_file = Some(f);
-            self.csv_bytes_written = 0;
-            self.is_logging = true;
+        match File::create(&fname) {
+            Ok(mut f) => {
+                let _ = writeln!(f, "Time(s),P(bar),H(mm),V(L),Flow(L/s),Temp(C)");
+                self.csv_file = Some(f);
+                self.csv_bytes_written = 0;
+                self.is_logging = true;
+                true
+            }
+            Err(_) => false,
         }
     }
 
@@ -605,7 +616,7 @@ impl CisternApp {
                 }
             });
 
-            // Item 10: Up/Down reorder + Delete per row
+            // Item 10: Delete per row (Up/Down removed — points must stay sorted by P for interp_hv)
             TableBuilder::new(ui)
                 .striped(true).cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                 .column(Column::initial(80.0)).column(Column::initial(80.0))
@@ -614,35 +625,25 @@ impl CisternApp {
                     header.col(|ui| { ui.strong("P (bar)"); });
                     header.col(|ui| { ui.strong("H (mm)"); });
                     header.col(|ui| { ui.strong("V (L)"); });
-                    header.col(|ui| { ui.strong("⇅ Del"); });
+                    header.col(|ui| { ui.strong("Del"); });
                 })
                 .body(|mut body| {
-                    let n = self.profile.points.len();
-                    let mut action: Option<(usize, i8)> = None; // (index, +1=down / -1=up / 0=del)
+                    let mut to_remove: Option<usize> = None;
                     for (i, pt) in self.profile.points.iter().enumerate() {
                         body.row(24.0, |mut row| {
                             row.col(|ui| { ui.label(format!("{:.4}", pt.p)); });
                             row.col(|ui| { ui.label(format!("{:.1}", pt.h)); });
                             row.col(|ui| { ui.label(format!("{:.2}", pt.v)); });
                             row.col(|ui| {
-                                if ui.add_enabled(i > 0, egui::Button::new("▲").min_size([18.0, 18.0].into())).clicked() {
-                                    action = Some((i, -1));
-                                }
-                                if ui.add_enabled(i + 1 < n, egui::Button::new("▼").min_size([18.0, 18.0].into())).clicked() {
-                                    action = Some((i, 1));
-                                }
-                                if ui.button("X").clicked() { action = Some((i, 0)); }
+                                if ui.button("X").clicked() { to_remove = Some(i); }
                             });
                         });
                     }
-                    if let Some((idx, op)) = action {
+                    if let Some(idx) = to_remove {
                         self.cal_undo_stack.push(self.profile.clone());
                         if self.cal_undo_stack.len() > 20 { self.cal_undo_stack.remove(0); }
-                        match op {
-                            -1 => { self.profile.points.swap(idx, idx - 1); }
-                             1 => { self.profile.points.swap(idx, idx + 1); }
-                             _ => { self.profile.points.remove(idx); }
-                        }
+                        self.profile.points.remove(idx);
+                        self.profile.sort_points();
                         self.sensor.update_profile(self.profile.clone());
                         self.profile_dirty = true;
                     }
@@ -1041,8 +1042,11 @@ impl eframe::App for CisternApp {
             self.apply_theme(ctx);
             self.theme_applied = true;
         }
-        // Item 20: apply font scale every frame (cheap no-op when unchanged)
-        ctx.set_pixels_per_point(self.font_scale * ctx.native_pixels_per_point().unwrap_or(1.0));
+        // Item 20: apply font scale only when it differs from current value
+        let target_ppp = self.font_scale * ctx.native_pixels_per_point().unwrap_or(1.0);
+        if (ctx.pixels_per_point() - target_ppp).abs() > 0.001 {
+            ctx.set_pixels_per_point(target_ppp);
+        }
 
         // ---- KEYBOARD SHORTCUTS ----
         ctx.input_mut(|i| {
@@ -1185,8 +1189,15 @@ impl eframe::App for CisternApp {
                         // Item 19: auto-rollover at 10 MB
                         if self.csv_bytes_written >= 10 * 1024 * 1024 {
                             if let Some(mut old) = self.csv_file.take() { let _ = old.flush(); }
-                            self.open_new_csv_segment();
-                            self.show_toast("CSV log rolled over (10 MB).");
+                            let ok = self.open_new_csv_segment();
+                            if ok {
+                                self.show_toast("CSV log rolled over (10 MB).");
+                            } else {
+                                // open failed — stop logging and reset counter to prevent retry storm
+                                self.is_logging = false;
+                                self.csv_bytes_written = 0;
+                                self.show_toast("⚠ CSV rollover failed — logging stopped.");
+                            }
                         }
                         if let Some(f) = &mut self.csv_file {
                             let temp_str = pt.temp_c.map_or(String::new(), |t| format!("{:.1}", t));
@@ -1594,18 +1605,15 @@ impl eframe::App for CisternApp {
                                 if ui.button("Yes, Stop").clicked() {
                                     self.stop_flush_confirm = false;
                                     self.is_flushing = false;
-                                    let end_vol = self.v_buf.last_y().unwrap_or(0.0);
-                                    let end_t = self.v_buf.last_x().unwrap_or(0.0);
+                                    // Use snapshot captured at "Stop" click — not dialog-close time
                                     let is_full = self.flush_type_idx == 0;
-                                    let vol_l = (self.flush_start_vol - end_vol).abs();
-                                    let time_s = (end_t - self.flush_start_time).abs();
+                                    let vol_l = (self.flush_start_vol - self.flush_pending_end_vol).abs();
+                                    let time_s = (self.flush_pending_end_t - self.flush_start_time).abs();
                                     let en14055_rate = if vol_l > 3.0 && time_s > 0.0 {
                                         Some((vol_l - 3.0) / time_s)
                                     } else { None };
-                                    // Item 7: record VLine marker at flush stop time
-                                    if let Some(t) = self.v_buf.last_x() {
-                                        self.flush_vlines.push((t, is_full));
-                                    }
+                                    // Item 7: VLine at the moment "Stop" was clicked
+                                    self.flush_vlines.push((self.flush_pending_end_t, is_full));
                                     self.flushes.push(FlushResult { is_full, vol_l, time_s, en14055_rate, temp_c: self.current_temp });
                                 }
                                 if ui.button("Cancel").clicked() { self.stop_flush_confirm = false; }
@@ -1620,7 +1628,9 @@ impl eframe::App for CisternApp {
                                     self.flush_start_vol = self.v_buf.last_y().unwrap_or(0.0);
                                     self.flush_start_time = self.v_buf.last_x().unwrap_or(0.0);
                                 } else {
-                                    // Ask for confirmation before stopping
+                                    // Capture end snapshot immediately at "Stop" click
+                                    self.flush_pending_end_vol = self.v_buf.last_y().unwrap_or(0.0);
+                                    self.flush_pending_end_t   = self.v_buf.last_x().unwrap_or(0.0);
                                     self.stop_flush_confirm = true;
                                 }
                             }
