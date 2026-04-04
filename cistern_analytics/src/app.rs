@@ -1,5 +1,5 @@
 use crate::sensor::{SensorCore, SensorEvent};
-use crate::logic::{CisternProfile, CalibrationPoint, FlushResult, run_compliance_checks, smooth};
+use crate::logic::{CisternProfile, CalibrationPoint, FlushResult, run_compliance_checks, smooth, smooth_last};
 use eframe::egui;
 use egui::{Color32, RichText, Key, Modifiers};
 use egui_extras::{TableBuilder, Column};
@@ -142,7 +142,7 @@ pub struct CisternApp {
     plot_mode: PlotMode,
     click_points: Vec<[f64; 2]>,
     
-    csv_file: Option<File>,
+    csv_file: Option<std::io::BufWriter<File>>, // buffered to avoid per-sample syscalls
     is_logging: bool,
     
     flush_type_idx: usize,
@@ -150,6 +150,9 @@ pub struct CisternApp {
     is_flushing: bool,
     flush_start_vol: f64,
     flush_start_time: f64,
+    // Snapshot captured at the moment "Stop" is clicked (before confirmation dialog)
+    flush_pending_end_vol: f64,
+    flush_pending_end_t: f64,
     
     compliance_results: Vec<String>,
     
@@ -207,6 +210,14 @@ pub struct CisternApp {
     vol_unit_ml: bool,
     // Item 19: CSV log size tracking for auto-rollover (10 MB)
     csv_bytes_written: u64,
+    // "Log last N minutes" window selector index (0=1, 1=2, 2=5, 3=10)
+    log_window_idx: usize,
+    // Cached avg_window parsed value — updated on settings load/save
+    avg_window_s: f64,
+    // Chart display cache — avoids re-smoothing every frame
+    chart_cache_gen: usize,
+    chart_cache_key: (usize, PlotMode, String, String), // (gen, mode, window, smooth)
+    display_pts_cache: Vec<egui_plot::PlotPoint>,
     // Item 6: recently used profile paths (persisted in settings)
     recent_profiles: Vec<String>,
     // Item 20: UI font scale factor
@@ -270,6 +281,8 @@ impl CisternApp {
             is_flushing: false,
             flush_start_vol: 0.0,
             flush_start_time: 0.0,
+            flush_pending_end_vol: 0.0,
+            flush_pending_end_t: 0.0,
             compliance_results: Vec::new(),
             current_p: 0.0, current_h: 0.0, current_v: 0.0, current_f: 0.0, current_temp: None,
             sensor_status_text: "--".to_string(),
@@ -301,6 +314,11 @@ impl CisternApp {
             flush_vlines: Vec::new(),
             vol_unit_ml: false,
             csv_bytes_written: 0,
+            log_window_idx: 0,
+            avg_window_s: 0.5,
+            chart_cache_gen: 0,
+            chart_cache_key: (usize::MAX, PlotMode::Height, String::new(), String::new()),
+            display_pts_cache: Vec::new(),
             recent_profiles: Vec::new(),
             font_scale: 1.0,
             show_wizard: false,
@@ -331,7 +349,7 @@ impl CisternApp {
 
     // ── Averaging window helper (mirrors Python get_avg_height) ──────────
     fn get_avg_height(&self) -> f64 {
-        let window_s: f64 = self.setting_avg_window.parse().unwrap_or(0.5);
+        let window_s = self.avg_window_s;
         let pts = self.h_buf.get_line_points();
         if pts.is_empty() { return self.current_h; }
         let now = pts.last().map(|p| p[0]).unwrap_or(0.0);
@@ -495,6 +513,7 @@ impl CisternApp {
                 self.recent_profiles       = s.recent_profiles;
                 self.font_scale            = s.font_scale;
                 self.show_wizard           = s.first_run; // show on first-ever run
+                self.avg_window_s          = self.setting_avg_window.parse().unwrap_or(0.5);
             }
         }
         // Push loaded temp offset to sensor thread
@@ -544,23 +563,73 @@ impl CisternApp {
         ctx.set_visuals(vis);
     }
 
+    /// Export the last `window_mins` minutes of ring-buffer data to a timestamped CSV file.
+    fn export_last_minutes(&mut self, window_mins: u32) {
+        let window_s = window_mins as f64 * 60.0;
+        let pts_p = self.p_buf.get_line_points();
+        let pts_h = self.h_buf.get_line_points();
+        let pts_v = self.v_buf.get_line_points();
+        let pts_f = self.f_buf.get_line_points();
+        let n = pts_p.len().min(pts_h.len()).min(pts_v.len()).min(pts_f.len());
+        if n == 0 { self.show_toast("No data in buffer."); return; }
+
+        let last_t = pts_p[n - 1][0];
+        let cutoff  = last_t - window_s;
+
+        let fname = format!("log_last{}min_{}.csv",
+            window_mins, Local::now().format("%Y%m%d_%H%M%S"));
+        match File::create(&fname) {
+            Ok(f) => {
+                let mut bw = std::io::BufWriter::new(f);
+                let _ = writeln!(bw, "Time(s),P(bar),H(mm),V(L),Flow(L/s)");
+                let mut rows = 0usize;
+                let mut write_err = false;
+                for i in 0..n {
+                    if pts_p[i][0] >= cutoff {
+                        if writeln!(bw, "{:.3},{:.5},{:.1},{:.2},{:.3}",
+                            pts_p[i][0], pts_p[i][1],
+                            pts_h[i][1], pts_v[i][1], pts_f[i][1]).is_err()
+                        {
+                            write_err = true;
+                            break;
+                        }
+                        rows += 1;
+                    }
+                }
+                if write_err {
+                    self.show_toast(&format!("⚠ Write error after {} rows — disk full?", rows));
+                } else {
+                    self.show_toast(&format!("Exported {} rows → {}", rows, fname));
+                }
+            }
+            Err(e) => self.show_toast(&format!("Export failed: {}", e)),
+        }
+    }
+
     fn toggle_csv_log(&mut self) {
         if self.is_logging {
             self.is_logging = false;
             if let Some(mut f) = self.csv_file.take() { let _ = f.flush(); }
         } else {
-            self.open_new_csv_segment();
+            if !self.open_new_csv_segment() {
+                self.show_toast("⚠ Could not create CSV log file.");
+            }
         }
     }
 
-    /// Open a fresh CSV segment (used on start and on 10 MB rollover).
-    fn open_new_csv_segment(&mut self) {
+    /// Open a fresh BufWriter CSV segment. Returns true on success.
+    fn open_new_csv_segment(&mut self) -> bool {
         let fname = format!("EN14055_Record_{}.csv", Local::now().format("%Y%m%d_%H%M%S"));
-        if let Ok(mut f) = File::create(&fname) {
-            let _ = writeln!(f, "Time(s),P(bar),H(mm),V(L),Flow(L/s),Temp(C)");
-            self.csv_file = Some(f);
-            self.csv_bytes_written = 0;
-            self.is_logging = true;
+        match File::create(&fname) {
+            Ok(f) => {
+                let mut bw = std::io::BufWriter::new(f);
+                let _ = writeln!(bw, "Time(s),P(bar),H(mm),V(L),Flow(L/s),Temp(C)");
+                self.csv_file = Some(bw);
+                self.csv_bytes_written = 0;
+                self.is_logging = true;
+                true
+            }
+            Err(_) => false,
         }
     }
 
@@ -605,7 +674,7 @@ impl CisternApp {
                 }
             });
 
-            // Item 10: Up/Down reorder + Delete per row
+            // Item 10: Delete per row (Up/Down removed — points must stay sorted by P for interp_hv)
             TableBuilder::new(ui)
                 .striped(true).cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                 .column(Column::initial(80.0)).column(Column::initial(80.0))
@@ -614,35 +683,25 @@ impl CisternApp {
                     header.col(|ui| { ui.strong("P (bar)"); });
                     header.col(|ui| { ui.strong("H (mm)"); });
                     header.col(|ui| { ui.strong("V (L)"); });
-                    header.col(|ui| { ui.strong("⇅ Del"); });
+                    header.col(|ui| { ui.strong("Del"); });
                 })
                 .body(|mut body| {
-                    let n = self.profile.points.len();
-                    let mut action: Option<(usize, i8)> = None; // (index, +1=down / -1=up / 0=del)
+                    let mut to_remove: Option<usize> = None;
                     for (i, pt) in self.profile.points.iter().enumerate() {
                         body.row(24.0, |mut row| {
                             row.col(|ui| { ui.label(format!("{:.4}", pt.p)); });
                             row.col(|ui| { ui.label(format!("{:.1}", pt.h)); });
                             row.col(|ui| { ui.label(format!("{:.2}", pt.v)); });
                             row.col(|ui| {
-                                if ui.add_enabled(i > 0, egui::Button::new("▲").min_size([18.0, 18.0].into())).clicked() {
-                                    action = Some((i, -1));
-                                }
-                                if ui.add_enabled(i + 1 < n, egui::Button::new("▼").min_size([18.0, 18.0].into())).clicked() {
-                                    action = Some((i, 1));
-                                }
-                                if ui.button("X").clicked() { action = Some((i, 0)); }
+                                if ui.button("X").clicked() { to_remove = Some(i); }
                             });
                         });
                     }
-                    if let Some((idx, op)) = action {
+                    if let Some(idx) = to_remove {
                         self.cal_undo_stack.push(self.profile.clone());
                         if self.cal_undo_stack.len() > 20 { self.cal_undo_stack.remove(0); }
-                        match op {
-                            -1 => { self.profile.points.swap(idx, idx - 1); }
-                             1 => { self.profile.points.swap(idx, idx + 1); }
-                             _ => { self.profile.points.remove(idx); }
-                        }
+                        self.profile.points.remove(idx);
+                        self.profile.sort_points();
                         self.sensor.update_profile(self.profile.clone());
                         self.profile_dirty = true;
                     }
@@ -687,7 +746,7 @@ impl CisternApp {
                                     let mut tmp = self.profile.points.clone();
                                     tmp.retain(|pt| (pt.p - p).abs() > 1e-6);
                                     tmp.push(CalibrationPoint { p, h, v });
-                                    tmp.sort_by(|a, b| a.p.partial_cmp(&b.p).unwrap());
+                                    tmp.sort_by(|a, b| a.p.total_cmp(&b.p));
                                     tmp
                                 };
                                 let monotone = sorted.windows(2).all(|w| w[1].h >= w[0].h);
@@ -919,16 +978,15 @@ impl CisternApp {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 if ui.button("Save").clicked() {
+                    self.avg_window_s = self.setting_avg_window.parse().unwrap_or(0.5);
                     self.save_settings();
-                    // Apply temp offset immediately to running sensor thread
                     if let Ok(off) = self.setting_temp_offset.parse::<f64>() {
                         self.sensor.set_temp_offset(off);
                     }
                     self.show_program_modal = false;
                 }
                 if ui.button("Cancel").clicked() {
-                    // Reload saved settings to discard in-dialog changes
-                    self.load_settings();
+                    self.load_settings(); // also refreshes avg_window_s
                     self.show_program_modal = false;
                 }
                 if ui.button("Reset to Defaults").clicked() {
@@ -945,6 +1003,7 @@ impl CisternApp {
                     self.is_dark_mode          = true;
                     self.theme_applied         = false;
                     self.font_scale            = 1.0;
+                    self.avg_window_s          = 0.5;
                     self.save_settings();
                     self.show_program_modal = false;
                 }
@@ -1041,8 +1100,11 @@ impl eframe::App for CisternApp {
             self.apply_theme(ctx);
             self.theme_applied = true;
         }
-        // Item 20: apply font scale every frame (cheap no-op when unchanged)
-        ctx.set_pixels_per_point(self.font_scale * ctx.native_pixels_per_point().unwrap_or(1.0));
+        // Item 20: apply font scale only when it differs from current value
+        let target_ppp = self.font_scale * ctx.native_pixels_per_point().unwrap_or(1.0);
+        if (ctx.pixels_per_point() - target_ppp).abs() > 0.001 {
+            ctx.set_pixels_per_point(target_ppp);
+        }
 
         // ---- KEYBOARD SHORTCUTS ----
         ctx.input_mut(|i| {
@@ -1137,6 +1199,7 @@ impl eframe::App for CisternApp {
                     self.h_buf.push([pt.time_s, pt.height_mm]);
                     self.v_buf.push([pt.time_s, pt.volume_l]);
                     self.f_buf.push([pt.time_s, self.current_f]);
+                    self.chart_cache_gen = self.chart_cache_gen.wrapping_add(1);
 
                     // Keep rolling height history for CWL/RWL smoothing (last 200 samples)
                     self.h_history.push(pt.height_mm);
@@ -1145,9 +1208,8 @@ impl eframe::App for CisternApp {
                     // ── CWL auto-detect state machine ──────────────────
                     if self.cwl_state == AutoState::Armed {
                         if pt.height_mm > self.cwl_peak { self.cwl_peak = pt.height_mm; }
-                        let alg = self.setting_cwl_smooth.clone();
-                        let sm = smooth(&self.h_history, &alg);
-                        let smoothed = sm.last().copied().unwrap_or(pt.height_mm);
+                        // smooth_last: O(W) for SMA, O(N) for EMA — no full-vector allocation
+                        let smoothed = smooth_last(&self.h_history, &self.setting_cwl_smooth);
                         let drop_thresh: f64 = self.setting_cwl_drop.parse().unwrap_or(1.5);
                         if self.cwl_peak - smoothed >= drop_thresh {
                             self.cwl_state = AutoState::Waiting;
@@ -1164,10 +1226,7 @@ impl eframe::App for CisternApp {
 
                     // ── RWL auto-detect state machine ──────────────────
                     if self.rwl_state == AutoState::Armed {
-                        // Wait for water level to drop then start 2s timer
-                        let alg = self.setting_cwl_smooth.clone();
-                        let sm = smooth(&self.h_history, &alg);
-                        let smoothed = sm.last().copied().unwrap_or(pt.height_mm);
+                        let smoothed = smooth_last(&self.h_history, &self.setting_cwl_smooth);
                         let drop_thresh: f64 = self.setting_cwl_drop.parse().unwrap_or(1.5);
                         if self.cwl_peak - smoothed >= drop_thresh {
                             self.rwl_state = AutoState::Waiting;
@@ -1185,8 +1244,15 @@ impl eframe::App for CisternApp {
                         // Item 19: auto-rollover at 10 MB
                         if self.csv_bytes_written >= 10 * 1024 * 1024 {
                             if let Some(mut old) = self.csv_file.take() { let _ = old.flush(); }
-                            self.open_new_csv_segment();
-                            self.show_toast("CSV log rolled over (10 MB).");
+                            let ok = self.open_new_csv_segment();
+                            if ok {
+                                self.show_toast("CSV log rolled over (10 MB).");
+                            } else {
+                                // open failed — stop logging and reset counter to prevent retry storm
+                                self.is_logging = false;
+                                self.csv_bytes_written = 0;
+                                self.show_toast("⚠ CSV rollover failed — logging stopped.");
+                            }
                         }
                         if let Some(f) = &mut self.csv_file {
                             let temp_str = pt.temp_c.map_or(String::new(), |t| format!("{:.1}", t));
@@ -1594,18 +1660,15 @@ impl eframe::App for CisternApp {
                                 if ui.button("Yes, Stop").clicked() {
                                     self.stop_flush_confirm = false;
                                     self.is_flushing = false;
-                                    let end_vol = self.v_buf.last_y().unwrap_or(0.0);
-                                    let end_t = self.v_buf.last_x().unwrap_or(0.0);
+                                    // Use snapshot captured at "Stop" click — not dialog-close time
                                     let is_full = self.flush_type_idx == 0;
-                                    let vol_l = (self.flush_start_vol - end_vol).abs();
-                                    let time_s = (end_t - self.flush_start_time).abs();
+                                    let vol_l = (self.flush_start_vol - self.flush_pending_end_vol).abs();
+                                    let time_s = (self.flush_pending_end_t - self.flush_start_time).abs();
                                     let en14055_rate = if vol_l > 3.0 && time_s > 0.0 {
                                         Some((vol_l - 3.0) / time_s)
                                     } else { None };
-                                    // Item 7: record VLine marker at flush stop time
-                                    if let Some(t) = self.v_buf.last_x() {
-                                        self.flush_vlines.push((t, is_full));
-                                    }
+                                    // Item 7: VLine at the moment "Stop" was clicked
+                                    self.flush_vlines.push((self.flush_pending_end_t, is_full));
                                     self.flushes.push(FlushResult { is_full, vol_l, time_s, en14055_rate, temp_c: self.current_temp });
                                 }
                                 if ui.button("Cancel").clicked() { self.stop_flush_confirm = false; }
@@ -1620,7 +1683,9 @@ impl eframe::App for CisternApp {
                                     self.flush_start_vol = self.v_buf.last_y().unwrap_or(0.0);
                                     self.flush_start_time = self.v_buf.last_x().unwrap_or(0.0);
                                 } else {
-                                    // Ask for confirmation before stopping
+                                    // Capture end snapshot immediately at "Stop" click
+                                    self.flush_pending_end_vol = self.v_buf.last_y().unwrap_or(0.0);
+                                    self.flush_pending_end_t   = self.v_buf.last_x().unwrap_or(0.0);
                                     self.stop_flush_confirm = true;
                                 }
                             }
@@ -1687,6 +1752,7 @@ impl eframe::App for CisternApp {
 
                     // 4. DATA LOG
                     egui::CollapsingHeader::new(RichText::new("DATA LOG").strong()).default_open(true).show(ui, |ui| {
+                        // Continuous logging
                         let l_text = if self.is_logging { "Stop Data Log (CSV)" } else { "Start Data Log (CSV)" };
                         let l_col = if self.is_logging { self.col_btn_danger() } else { self.col_btn_success() };
                         if ui.add_sized([ui.available_width(), 26.0], egui::Button::new(RichText::new(l_text).color(Color32::WHITE)).fill(l_col)).clicked() {
@@ -1695,6 +1761,29 @@ impl eframe::App for CisternApp {
                         if self.is_logging {
                             ui.label(RichText::new("● Recording…").color(self.col_red()).size(12.0));
                         }
+
+                        ui.add_space(4.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+
+                        // Snapshot export: last 1 / 2 / 5 / 10 minutes from ring buffer
+                        ui.label(RichText::new("Export last:").color(self.col_gray()).size(12.0));
+                        ui.horizontal(|ui| {
+                            const WINDOWS: &[(&str, u32)] = &[("1 min", 1), ("2 min", 2), ("5 min", 5), ("10 min", 10)];
+                            egui::ComboBox::from_id_source("cb_log_win")
+                                .selected_text(WINDOWS[self.log_window_idx].0)
+                                .show_ui(ui, |ui| {
+                                    for (i, &(label, _)) in WINDOWS.iter().enumerate() {
+                                        ui.selectable_value(&mut self.log_window_idx, i, label);
+                                    }
+                                });
+                            let mins = WINDOWS[self.log_window_idx].1;
+                            if ui.button("💾 Save CSV").on_hover_text(
+                                format!("Export the last {} minute(s) of buffered data to a CSV file", mins)
+                            ).clicked() {
+                                self.export_last_minutes(mins);
+                            }
+                        });
                     });
 
                     // Toast notification
@@ -1755,7 +1844,12 @@ impl eframe::App for CisternApp {
                         self.show_toast(&format!("Chart exported: {}", fname));
                     }
                 }
-                if ui.button("Clear Chart").clicked() { self.p_buf.clear(); self.h_buf.clear(); self.v_buf.clear(); self.f_buf.clear(); self.click_points.clear(); }
+                if ui.button("Clear Chart").clicked() {
+                    self.p_buf.clear(); self.h_buf.clear();
+                    self.v_buf.clear(); self.f_buf.clear();
+                    self.click_points.clear();
+                    self.chart_cache_gen = self.chart_cache_gen.wrapping_add(1); // invalidate display cache
+                }
                 // Item 15: zoom reset
                 if ui.button("⟳ Reset Zoom").on_hover_text("Reset chart pan/zoom to fit all data").clicked() {
                     self.reset_zoom = true;
@@ -1773,36 +1867,51 @@ impl eframe::App for CisternApp {
             });
             ui.add_space(4.0);
 
-            // PLOT AREA — apply window filter then smoothing
-            let raw_pts = match self.plot_mode {
-                PlotMode::Pressure => self.p_buf.get_line_points(),
-                PlotMode::Height   => self.h_buf.get_line_points(),
-                PlotMode::Volume   => self.v_buf.get_line_points(),
-                PlotMode::Flow     => self.f_buf.get_line_points(),
-            };
+            // PLOT AREA — rebuild display cache only when data or settings change
+            let current_key = (
+                self.chart_cache_gen,
+                self.plot_mode,
+                self.chart_window_val.clone(),
+                self.chart_smooth_val.clone(),
+            );
+            if current_key != self.chart_cache_key {
+                self.chart_cache_key = current_key;
 
-            // Chart window filter
-            let window_secs: Option<f64> = match self.chart_window_val.as_str() {
-                "10s"  => Some(10.0),
-                "30s"  => Some(30.0),
-                "60s"  => Some(60.0),
-                "5min" => Some(300.0),
-                _      => None, // "All"
-            };
-            let windowed_pts: Vec<[f64; 2]> = if let Some(ws) = window_secs {
-                if let Some(last_t) = raw_pts.last().map(|p| p[0]) {
-                    raw_pts.into_iter().filter(|p| last_t - p[0] <= ws).collect()
-                } else { raw_pts }
-            } else { raw_pts };
+                let raw_pts = match self.plot_mode {
+                    PlotMode::Pressure => self.p_buf.get_line_points(),
+                    PlotMode::Height   => self.h_buf.get_line_points(),
+                    PlotMode::Volume   => self.v_buf.get_line_points(),
+                    PlotMode::Flow     => self.f_buf.get_line_points(),
+                };
 
-            // Apply chart smoothing
-            let display_pts: Vec<[f64; 2]> = if self.chart_smooth_val != "None" && windowed_pts.len() > 1 {
-                let ys: Vec<f64> = windowed_pts.iter().map(|p| p[1]).collect();
-                let smoothed = smooth(&ys, &self.chart_smooth_val);
-                windowed_pts.iter().zip(smoothed.iter()).map(|(p, &sy)| [p[0], sy]).collect()
-            } else { windowed_pts };
+                let window_secs: Option<f64> = match self.chart_window_val.as_str() {
+                    "10s"  => Some(10.0),
+                    "30s"  => Some(30.0),
+                    "60s"  => Some(60.0),
+                    "5min" => Some(300.0),
+                    _      => None,
+                };
+                let windowed_pts: Vec<[f64; 2]> = if let Some(ws) = window_secs {
+                    if let Some(last_t) = raw_pts.last().map(|p| p[0]) {
+                        raw_pts.into_iter().filter(|p| last_t - p[0] <= ws).collect()
+                    } else { raw_pts }
+                } else { raw_pts };
 
-            let line = Line::new(display_pts).color(self.color_sensor).width(1.5).name("Sensor");
+                self.display_pts_cache = if self.chart_smooth_val != "None" && windowed_pts.len() > 1 {
+                    let ys: Vec<f64> = windowed_pts.iter().map(|p| p[1]).collect();
+                    let smoothed = smooth(&ys, &self.chart_smooth_val);
+                    windowed_pts.iter().zip(smoothed.iter())
+                        .map(|(p, &sy)| egui_plot::PlotPoint::new(p[0], sy))
+                        .collect()
+                } else {
+                    windowed_pts.into_iter()
+                        .map(|p| egui_plot::PlotPoint::new(p[0], p[1]))
+                        .collect()
+                };
+            }
+
+            let line = Line::new(egui_plot::PlotPoints::Owned(self.display_pts_cache.clone()))
+                .color(self.color_sensor).width(1.5).name("Sensor");
 
             let plot_bg = if self.is_dark_mode { Color32::from_rgb(25, 25, 40) } else { Color32::from_rgb(248, 249, 252) };
             let grid_col = if self.is_dark_mode { Color32::from_rgb(60, 60, 80) } else { Color32::from_rgb(200, 204, 215) };

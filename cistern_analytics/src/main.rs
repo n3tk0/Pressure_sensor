@@ -20,14 +20,15 @@ fn load_icon() -> Option<egui::IconData> {
 
 fn main() -> Result<(), eframe::Error> {
     // Application window configuration
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1400.0, 900.0])
-            .with_min_inner_size([1320.0, 720.0])
-            .with_title("EN 14055 Cistern Analytics (Rust)")
-            .with_icon(std::sync::Arc::new(load_icon().unwrap())),
-        ..Default::default()
-    };
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([1400.0, 900.0])
+        .with_min_inner_size([1320.0, 720.0])
+        .with_title("EN 14055 Cistern Analytics (Rust)");
+    // Icon is optional — missing file must not prevent startup
+    if let Some(icon) = load_icon() {
+        viewport = viewport.with_icon(std::sync::Arc::new(icon));
+    }
+    let options = eframe::NativeOptions { viewport, ..Default::default() };
 
     eframe::run_native(
         "EN 14055 Cistern Analytics",
@@ -35,7 +36,10 @@ fn main() -> Result<(), eframe::Error> {
         Box::new(|cc| {
             let mut fonts = egui::FontDefinitions::default();
             fonts.font_data.insert("samsung".to_owned(), egui::FontData::from_static(include_bytes!("../../fonts/SamsungSans-Regular.ttf")));
-            fonts.families.get_mut(&egui::FontFamily::Proportional).unwrap().insert(0, "samsung".to_owned());
+            // Font family map is always populated by egui; log a warning if somehow missing
+            if let Some(list) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+                list.insert(0, "samsung".to_owned());
+            }
             // Increase global font size slightly
             let mut style = (*cc.egui_ctx.style()).clone();
             for (_ts, font_id) in style.text_styles.iter_mut() { font_id.size *= 1.25; }

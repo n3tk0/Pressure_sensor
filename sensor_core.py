@@ -256,7 +256,10 @@ def smooth(data, alg):
 
     # ── SMA (Simple Moving Average) ──
     if alg.startswith("SMA"):
-        w = int(alg.split("-")[1])
+        try:
+            w = int(alg.split("-")[1])
+        except (IndexError, ValueError):
+            w = 5  # safe default matches Rust fallback
         for i in range(n):
             s = max(0, i - w + 1)
             r.append(sum(data[s:i+1]) / (i - s + 1))
@@ -281,9 +284,12 @@ def smooth(data, alg):
             ema2.append(a * ema1[i] + (1 - a) * ema2[-1])
         return [2 * e1 - e2 for e1, e2 in zip(ema1, ema2)]
 
-    # ── Median Filter (window 5) ──
+    # ── Median Filter — parse window size from string, default 5 (matches Rust) ──
     if alg.startswith("Median"):
-        w = 5
+        try:
+            w = int(alg.split("-")[1])
+        except (IndexError, ValueError):
+            w = 5
         half = w // 2
         for i in range(n):
             lo = max(0, i - half)
@@ -641,7 +647,7 @@ class SensorApp:
     def get_avg_height(self):
         window = self.app_settings.get("avg_window", 0.5)
         with self.data_lock:
-            if not self.h_buf:
+            if not self.h_buf or not self.t_buf:
                 return self.current_height
             now = self.t_buf[-1]
             vals = []

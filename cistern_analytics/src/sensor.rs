@@ -92,11 +92,19 @@ impl SensorCore {
             let mut profile = CisternProfile::default();
             let mut io_port: u32 = 1;
             let mut temp_offset: f64 = 0.0;
+            // Pre-built request bytes — rebuilt only on Connect (not every loop iteration)
+            let mut request_bytes: Vec<u8> = Vec::new();
 
             loop {
                 match rx_cmd.try_recv() {
                     Ok(SensorCommand::Connect { port, baud, io_port: p, polling_ms: ms }) => {
                         io_port = p;
+                        // Build request once per connection
+                        let payload = format!(
+                            r#"{{"code": 10, "cid": 1, "adr": "/getdatamulti", "data": {{"datatosend": ["/iolinkmaster/port[{}]/iolinkdevice/pdin"]}}}}"#,
+                            io_port
+                        );
+                        request_bytes = format!("\x01\x0110{:08X}{}", payload.len(), payload).into_bytes();
                         match serialport::new(&port, baud)
                             .timeout(Duration::from_millis(ms as u64))
                             .open()
@@ -125,14 +133,7 @@ impl SensorCore {
                 }
 
                 if let Some(port_handle) = &mut serial {
-                    // Build request for the configured IO-Link port index
-                    let payload = format!(
-                        r#"{{"code": 10, "cid": 1, "adr": "/getdatamulti", "data": {{"datatosend": ["/iolinkmaster/port[{}]/iolinkdevice/pdin"]}}}}"#,
-                        io_port
-                    );
-                    let req = format!("\x01\x0110{:08X}{}", payload.len(), payload);
-
-                    if let Err(e) = port_handle.write_all(req.as_bytes()) {
+                    if let Err(e) = port_handle.write_all(&request_bytes) {
                         let _ = tx_evt.send(SensorEvent::Error(format!("Write fault: {}", e)));
                         serial = None;
                         continue;
@@ -231,10 +232,11 @@ impl SensorCore {
         if hx.len() < 8 { return None; }
         let raw = u32::from_str_radix(&hx[..8], 16).ok()?;
         let p_bar = (raw as f64) * PRESSURE_SCALE_BAR_PER_LSB;
+        // 0x00 = all active-LOW bits clear → FAULT (safe default for malformed/missing bytes)
         let status = if hx.len() >= 10 {
-            u8::from_str_radix(&hx[8..10], 16).unwrap_or(0xFF)
+            u8::from_str_radix(&hx[8..10], 16).unwrap_or(0x00)
         } else {
-            0xFF
+            0x00
         };
         let temp = if hx.len() >= 20 {
             u16::from_str_radix(&hx[16..20], 16)
