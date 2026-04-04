@@ -22,7 +22,7 @@ pub struct CisternProfile {
 
 impl CisternProfile {
     pub fn sort_points(&mut self) {
-        self.points.sort_by(|a, b| a.p.partial_cmp(&b.p).unwrap());
+        self.points.sort_by(|a, b| a.p.total_cmp(&b.p));
     }
 
     /// Linear interpolation returning (height_mm, volume_l) for the given pressure.
@@ -270,7 +270,7 @@ pub fn smooth(data: &[f64], alg: &str) -> Vec<f64> {
             let slice = &data[lo..hi];
             scratch[..slice.len()].copy_from_slice(slice);
             let buf = &mut scratch[..slice.len()];
-            buf.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            buf.sort_by(|a, b| a.total_cmp(b));
             r.push(buf[buf.len() / 2]);
         }
         return r;

@@ -232,10 +232,11 @@ impl SensorCore {
         if hx.len() < 8 { return None; }
         let raw = u32::from_str_radix(&hx[..8], 16).ok()?;
         let p_bar = (raw as f64) * PRESSURE_SCALE_BAR_PER_LSB;
+        // 0x00 = all active-LOW bits clear → FAULT (safe default for malformed/missing bytes)
         let status = if hx.len() >= 10 {
-            u8::from_str_radix(&hx[8..10], 16).unwrap_or(0xFF)
+            u8::from_str_radix(&hx[8..10], 16).unwrap_or(0x00)
         } else {
-            0xFF
+            0x00
         };
         let temp = if hx.len() >= 20 {
             u16::from_str_radix(&hx[16..20], 16)

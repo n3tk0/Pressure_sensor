@@ -737,7 +737,7 @@ impl CisternApp {
                                     let mut tmp = self.profile.points.clone();
                                     tmp.retain(|pt| (pt.p - p).abs() > 1e-6);
                                     tmp.push(CalibrationPoint { p, h, v });
-                                    tmp.sort_by(|a, b| a.p.partial_cmp(&b.p).unwrap());
+                                    tmp.sort_by(|a, b| a.p.total_cmp(&b.p));
                                     tmp
                                 };
                                 let monotone = sorted.windows(2).all(|w| w[1].h >= w[0].h);
