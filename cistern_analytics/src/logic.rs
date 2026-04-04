@@ -57,7 +57,29 @@ impl CisternProfile {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// EN 14055 cistern classification.
+#[derive(PartialEq, Clone, Copy, Debug, Default, Serialize, Deserialize)]
+pub enum CisternClass {
+    Class1,
+    #[default]
+    Class2,
+}
+
+/// Specific type/volume variant — Class 1 types from §4, Class 2 volumes from §4.2.
+#[derive(PartialEq, Clone, Copy, Debug, Default, Serialize, Deserialize)]
+pub enum CisternTypeVariant {
+    // ── Class 1 ─────────────────────────────────────────────────────
+    Type6,   // Full: 6.0–6.5 L  | Part: 3.0–4.0 L
+    Type5,   // Full: 4.5–5.5 L  | Part: 3.0–4.0 L
+    Type4,   // Full: 4.0–4.5 L  | Part: 2.0–3.0 L
+    // ── Class 2 ─────────────────────────────────────────────────────
+    #[default]
+    Max6_0,  // Full: ≤ 6.0 L    | Part: ≤ 2/3 of full flush
+    L4_5,    // Full: 4.15–4.85 L (4.5 ± 0.35) | Part: ≤ 2/3 of full flush
+    L4_0,    // Full: 3.70–4.30 L (4.0 ± 0.30) | Part: ≤ 2/3 of full flush
+}
+
+#[derive(Clone, Debug)]
 pub struct FlushResult {
     pub is_full: bool,
     pub vol_l: f64,
@@ -66,6 +88,60 @@ pub struct FlushResult {
     pub en14055_rate: Option<f64>,
     /// Water temperature at flush time (°C).
     pub temp_c: Option<f64>,
+    /// Result of EN 14055 volume compliance check at time of recording.
+    pub compliance_pass: Option<bool>,
+}
+
+/// A matched pair of one full flush followed by one part flush.
+/// This is the fundamental unit of an EN 14055 test cycle.
+#[derive(Clone, Debug)]
+pub struct FlushPair {
+    pub full: FlushResult,
+    pub part: FlushResult,
+}
+
+/// Flatten pairs into a flat `Vec<FlushResult>` for use with
+/// `run_compliance_checks` (which expects the old flat slice).
+pub fn flush_pairs_to_results(pairs: &[FlushPair]) -> Vec<FlushResult> {
+    pairs.iter().flat_map(|p| [p.full.clone(), p.part.clone()]).collect()
+}
+
+/// Validate a single flush measurement against EN 14055 volume limits.
+///
+/// * `class`             – cistern classification (Class1 / Class2)
+/// * `variant`           – specific type/volume variant for that class
+/// * `is_part_flush`     – true if this is a part flush
+/// * `measured_vol_l`    – measured flush volume in litres
+/// * `last_full_vol_l`   – most-recent full-flush volume (Class 2 needs it for the 2/3 part rule)
+pub fn validate_flush(
+    class: CisternClass,
+    variant: CisternTypeVariant,
+    is_part_flush: bool,
+    measured_vol_l: f64,
+    last_full_vol_l: Option<f64>,
+) -> bool {
+    match class {
+        // ── Class 1: fixed absolute ranges from EN 14055 §4 ──────────
+        CisternClass::Class1 => match (variant, is_part_flush) {
+            (CisternTypeVariant::Type6, false) => (6.0..=6.5).contains(&measured_vol_l),
+            (CisternTypeVariant::Type6, true)  => (3.0..=4.0).contains(&measured_vol_l),
+            (CisternTypeVariant::Type5, false) => (4.5..=5.5).contains(&measured_vol_l),
+            (CisternTypeVariant::Type5, true)  => (3.0..=4.0).contains(&measured_vol_l),
+            (CisternTypeVariant::Type4, false) => (4.0..=4.5).contains(&measured_vol_l),
+            (CisternTypeVariant::Type4, true)  => (2.0..=3.0).contains(&measured_vol_l),
+            _ => false, // Class 2 variant mis-selected with Class 1
+        },
+        // ── Class 2: absolute tolerances; part flush = ≤ 2/3 full ───
+        CisternClass::Class2 => match (variant, is_part_flush) {
+            (CisternTypeVariant::Max6_0, false) => measured_vol_l <= 6.0,
+            (CisternTypeVariant::L4_5,   false) => (4.15..=4.85).contains(&measured_vol_l),
+            (CisternTypeVariant::L4_0,   false) => (3.70..=4.30).contains(&measured_vol_l),
+            // Part flush: ≤ 2/3 × last measured full flush
+            (_, true) => last_full_vol_l
+                .map_or(false, |fv| measured_vol_l <= (2.0 / 3.0) * fv),
+            _ => false, // Class 1 variant mis-selected with Class 2
+        },
+    }
 }
 
 // ── EN 14055 constants ─────────────────────────────────────────────────
@@ -217,7 +293,8 @@ pub fn smooth(data: &[f64], alg: &str) -> Vec<f64> {
     if alg.starts_with("SMA") {
         let w: usize = alg.split('-').nth(1)
             .and_then(|s| s.parse().ok())
-            .unwrap_or(5);
+            .unwrap_or(5)
+            .max(1); // guard: SMA-0 would cause divide-by-zero
         let mut r = Vec::with_capacity(n);
         let mut window_sum = 0.0_f64;
         for i in 0..n {
@@ -326,6 +403,7 @@ pub fn smooth_last(data: &[f64], alg: &str) -> f64 {
         let w: usize = alg.split('-').nth(1)
             .and_then(|s| s.parse().ok())
             .unwrap_or(5)
+            .max(1)  // guard: SMA-0 would cause divide-by-zero
             .min(n);
         return data[n - w..].iter().sum::<f64>() / w as f64;
     }
@@ -466,10 +544,10 @@ mod tests {
     // ── run_compliance_checks ───────────────────────────────────────────────
 
     fn full_flush(vol: f64) -> FlushResult {
-        FlushResult { is_full: true, vol_l: vol, time_s: 10.0, en14055_rate: None, temp_c: None }
+        FlushResult { is_full: true, vol_l: vol, time_s: 10.0, en14055_rate: None, temp_c: None, compliance_pass: None }
     }
     fn part_flush(vol: f64) -> FlushResult {
-        FlushResult { is_full: false, vol_l: vol, time_s: 10.0, en14055_rate: None, temp_c: None }
+        FlushResult { is_full: false, vol_l: vol, time_s: 10.0, en14055_rate: None, temp_c: None, compliance_pass: None }
     }
 
     #[test]
@@ -557,7 +635,7 @@ mod tests {
         let p = CisternProfile::default();
         let results: Vec<FlushResult> = (0..3).map(|_| FlushResult {
             is_full: true, vol_l: 5.5, time_s: 10.0,
-            en14055_rate: None, temp_c: Some(18.0),
+            en14055_rate: None, temp_c: Some(18.0), compliance_pass: None,
         }).collect();
         let flags = run_compliance_checks(&p, &results);
         assert!(flags.iter().any(|f| f.contains("[INFO]") && f.to_lowercase().contains("temp")));

@@ -303,7 +303,7 @@ def _refresh_flush_table():
         dpg.add_table_column(label="Vol",  width_fixed=True, init_width_or_weight=46)
         dpg.add_table_column(label="Time", width_fixed=True, init_width_or_weight=42)
         dpg.add_table_column(label="L/s",  width_fixed=True, init_width_or_weight=40)
-        dpg.add_table_column(label="EN*",  width_fixed=True, init_width_or_weight=40)
+        dpg.add_table_column(label="EN L/s", width_fixed=True, init_width_or_weight=46)
         dpg.add_table_column(label="Del",  width_fixed=True, init_width_or_weight=26)
         for i, r in enumerate(results):
             total_rate = r["vol"] / r["time"] if r["time"] > 0 else 0
@@ -334,59 +334,31 @@ def _delete_flush_row(sender, app_data, user_data):
         _refresh_flush_table()
 
 
-def _toggle_flush_measure():
-    if not app.flush_measuring:
-        with app._flush_lock:
-            app.flush_start_vol = app.current_volume
-            app.flush_start_h = app.current_height
-            app.flush_start_time = time.time()
-            app.flush_vol_history = []
-            app.flush_min_h = float("inf")
-            app.flush_rising = False
-            app.flush_rising_timer = 0.0
-            app.flush_measuring = True
-        dpg.set_item_label("btn_flush", "Stop Flush Measurement")
-        dpg.bind_item_theme("btn_flush", "theme_btn_danger")
-    else:
-        with app._flush_lock:
-            app.flush_measuring = False
-            history = list(app.flush_vol_history)
-            elapsed = time.time() - app.flush_start_time
-            start_vol = app.flush_start_vol
+def _arm_flush():
+    """ARM button clicked: arm if IDLE, disarm/cancel if ARMED or RECORDING."""
+    state = app.flush_state
+    if state == "IDLE":
         flush_type = dpg.get_value("combo_flush_type") if dpg.does_item_exist("combo_flush_type") else "Full Flush"
-        snap_temp = app.current_temperature
-        if history:
-            min_vol = min(r[1] for r in history)
-            delta_vol = abs(start_vol - min_vol)
-        else:
-            delta_vol = abs(start_vol - app.current_volume)
-        en14055_rate = None
-        en14055_note = None
-        if history and delta_vol > 3.0:
-            v_start = start_vol
-            v_skip_start = v_start - 1.0
-            v_end = min(r[1] for r in history)
-            v_skip_end = v_end + 2.0
-            t1 = next((r[0] for r in history if r[1] <= v_skip_start), None)
-            t2 = next((r[0] for r in history if r[1] <= v_skip_end), None)
-            if t1 and t2 and t2 > t1:
-                eff_vol = v_skip_start - v_skip_end
-                eff_time = t2 - t1
-                if eff_time > 0:
-                    en14055_rate = eff_vol / eff_time
-                else:
-                    en14055_note = "N/A (flush window too short)"
-            else:
-                en14055_note = "N/A (flush too short for skip-window)"
-        app.flush_results.append({
-            "type": flush_type, "vol": delta_vol,
-            "time": elapsed, "en14055_rate": en14055_rate,
-            "en14055_note": en14055_note,
-            "temp_c": snap_temp,
-        })
-        dpg.set_item_label("btn_flush", "Start Flush Measurement")
+        app.arm_flush(flush_type)
+    else:
+        app.cancel_flush()
+    _update_flush_button()
+
+
+def _update_flush_button():
+    """Sync ARM button label and theme to current flush_state."""
+    if not dpg.does_item_exist("btn_flush"):
+        return
+    state = app.flush_state
+    if state == "IDLE":
+        dpg.set_item_label("btn_flush", "ARM System")
         dpg.bind_item_theme("btn_flush", "theme_btn_success")
-        _refresh_flush_table()
+    elif state == "ARMED":
+        dpg.set_item_label("btn_flush", "ARMED — waiting for flush... (click to disarm)")
+        dpg.bind_item_theme("btn_flush", "theme_btn_warning" if dpg.does_alias_exist("theme_btn_warning") else "theme_btn_danger")
+    else:  # RECORDING
+        dpg.set_item_label("btn_flush", "Recording... (click to cancel)")
+        dpg.bind_item_theme("btn_flush", "theme_btn_danger")
 
 
 def _clear_flush():
@@ -1190,6 +1162,24 @@ def update_ui():
             cache.set("lbl_cwl_auto_st", "MWL/CWL: IDLE \u2014 use Auto-detect or Manual")
             _bind_status("lbl_cwl_auto_st", "theme_gray")
 
+    # Flush ARM state label
+    if dpg.does_item_exist("lbl_flush_state"):
+        flush_st = app.flush_state
+        if flush_st == "ARMED":
+            cache.set("lbl_flush_state", "ARMED \u2014 watching for drop \u22651.5 mm")
+            dpg.configure_item("lbl_flush_state", color=COL_ORANGE)
+        elif flush_st == "RECORDING":
+            elapsed = 0.0
+            with app._flush_lock:
+                with app.data_lock:
+                    t_now = app.t_buf[-1] if app.t_buf else 0.0
+                elapsed = max(0.0, t_now - app.flush_start_t)
+            cache.set("lbl_flush_state", f"RECORDING \u2014 {elapsed:.1f}s")
+            dpg.configure_item("lbl_flush_state", color=COL_RED if hasattr(dpg, "COL_RED") else (255, 80, 80, 255))
+        else:
+            cache.set("lbl_flush_state", "IDLE \u2014 press ARM to start auto-detection")
+            dpg.configure_item("lbl_flush_state", color=COL_GRAY)
+
 
 _AXIS_LABELS = {
     "Height (mm)": "Height (mm)",
@@ -1301,24 +1291,14 @@ def update_hover_tooltip():
     dpg.configure_item("hover_annot", label=f"T: {st:.1f}s\n{sy:.2f} {unit}", show=True)
 
 
-def _tick_flush_auto_stop(h: float, now: float):
-    if not app.flush_measuring:
-        return
-    elapsed = now - app.flush_start_time
-    if elapsed < 3.0:
-        return
-    if h < app.flush_min_h:
-        app.flush_min_h = h
-        app.flush_rising = False
-    if not app.flush_rising and h > app.flush_min_h + 5.0:
-        app.flush_rising = True
-        app.flush_rising_timer = now
-    if app.flush_rising and (now - app.flush_rising_timer >= 2.0):
-        _toggle_flush_measure()
+
+_frame_flush_state_prev: str = "IDLE"
+_frame_flush_version_prev: int = 0
 
 
 def frame_callback():
     """Per-frame tick — UI updates, chart updates, detection ticks."""
+    global _frame_flush_state_prev, _frame_flush_version_prev
     now = time.time()
     ui_interval = app.app_settings.get("ui_refresh_ms", 50) / 1000.0
     chart_interval = app.app_settings.get("chart_refresh_ms", 100) / 1000.0
@@ -1332,7 +1312,17 @@ def frame_callback():
             _refresh_limits()
         if app.tick_cwl_auto(h, h_history, t_history):
             _refresh_limits()
-        _tick_flush_auto_stop(h, now)
+
+        # Detect ARM state changes and auto-completed flushes
+        cur_state   = app.flush_state
+        cur_version = app.flush_results_version
+        if cur_state != _frame_flush_state_prev:
+            _update_flush_button()
+            _frame_flush_state_prev = cur_state
+        if cur_version != _frame_flush_version_prev:
+            _refresh_flush_table()
+            _frame_flush_version_prev = cur_version
+
         update_ui()
         _check_toast_dismiss(now)
         app._last_ui_tick = now
@@ -1702,10 +1692,12 @@ def _build_left_panel():
                               default_value="Full Flush",
                               tag="combo_flush_type", width=-1)
             dpg.add_spacer(height=3)
-            dpg.add_button(label="Start Flush Measurement", tag="btn_flush",
-                           callback=_toggle_flush_measure, width=-1)
+            dpg.add_button(label="ARM System", tag="btn_flush",
+                           callback=_arm_flush, width=-1)
             dpg.bind_item_theme("btn_flush", "theme_btn_success")
-            dpg.add_text("* EN col = rate ignoring first 1L and last 2L",
+            dpg.add_text("IDLE \u2014 press ARM to start auto-detection",
+                         tag="lbl_flush_state", color=COL_GRAY)
+            dpg.add_text("* EN L/s col = rate excl. first 1L and last 2L",
                          color=COL_GRAY)
             dpg.add_spacer(height=3)
             with dpg.child_window(tag="flush_table_area", height=145,
