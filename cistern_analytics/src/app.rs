@@ -1674,7 +1674,7 @@ impl eframe::App for CisternApp {
                                 }
                             }
                         }
-                        ui.label(RichText::new("* EN col = rate excluding first 1 L and last 2 L").color(self.col_gray()));
+                        ui.label(RichText::new("* EN L/s = rate excl. first 1 L and last 2 L (V2 method)").color(self.col_gray()));
 
                         TableBuilder::new(ui)
                             .striped(true).cell_layout(egui::Layout::left_to_right(egui::Align::Center))
@@ -1682,7 +1682,7 @@ impl eframe::App for CisternApp {
                             .column(Column::initial(42.0)).column(Column::initial(40.0)).column(Column::initial(40.0)).column(Column::initial(26.0))
                             .header(24.0, |mut h| {
                                 h.col(|ui|{ui.strong("#");}); h.col(|ui|{ui.strong("Type");}); h.col(|ui|{ui.strong("Vol");});
-                                h.col(|ui|{ui.strong("Time");}); h.col(|ui|{ui.strong("L/s");}); h.col(|ui|{ui.strong("EN*");}); h.col(|ui|{ui.strong("Del");});
+                                h.col(|ui|{ui.strong("Time");}); h.col(|ui|{ui.strong("L/s");}); h.col(|ui|{ui.strong("EN L/s");}); h.col(|ui|{ui.strong("Del");});
                             })
                             .body(|mut body| {
                                 let mut to_del = None;
