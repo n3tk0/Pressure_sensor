@@ -1784,8 +1784,8 @@ impl eframe::App for CisternApp {
             ui.horizontal(|ui| {
                 let avail_w = ui.available_width();
                 let show_extras = avail_w > 520.0; // Export CSV + Reset Zoom inline when wide
-                let show_delta  = avail_w > 350.0; // Delta inline when medium+
 
+                // ── Always-inline left items ─────────────────────────────────
                 ui.label("Axis:");
                 egui::ComboBox::from_id_source("cb_axis").selected_text(match self.plot_mode { PlotMode::Height=>"Height (mm)", PlotMode::Volume=>"Volume (L)", PlotMode::Flow=>"Flow Rate (L/s)", _=>"Pressure" })
                     .show_ui(ui, |ui| {
@@ -1806,66 +1806,38 @@ impl eframe::App for CisternApp {
 
                 if show_extras {
                     ui.add_space(4.0);
-                    if ui.button("Export CSV").on_hover_text("Export current chart data to CSV").clicked() {
-                        let fname = format!("chart_export_{}.csv", Local::now().format("%Y%m%d_%H%M%S"));
-                        if let Ok(mut f) = File::create(&fname) {
-                            let _ = writeln!(f, "Time(s),P(bar),H(mm),V(L),Flow(L/s)");
-                            let pts_p = self.p_buf.get_line_points();
-                            let pts_h = self.h_buf.get_line_points();
-                            let pts_v = self.v_buf.get_line_points();
-                            let pts_f = self.f_buf.get_line_points();
-                            let n = pts_p.len().min(pts_h.len()).min(pts_v.len()).min(pts_f.len());
-                            for i in 0..n {
-                                let _ = writeln!(f, "{:.3},{:.5},{:.1},{:.2},{:.3}",
-                                    pts_p[i][0], pts_p[i][1], pts_h[i][1], pts_v[i][1], pts_f[i][1]);
-                            }
-                            self.show_toast(&format!("Chart exported: {}", fname));
-                        }
-                    }
                     if ui.button("Reset Zoom").on_hover_text("Reset chart pan/zoom to fit all data").clicked() {
                         self.reset_zoom = true;
                     }
                 }
 
-                if show_delta {
-                    ui.add_space(4.0);
-                    ui.label(RichText::new("Delta:").color(self.col_gray()));
-                    if self.click_points.len() == 2 {
-                        let dt = (self.click_points[1][0] - self.click_points[0][0]).abs();
-                        let dy = self.click_points[1][1] - self.click_points[0][1];
-                        let slope = if dt > 0.001 { dy / dt } else { 0.0 };
-                        ui.label(RichText::new(format!("{:.1}s | Δ{:.2} | {:.3}/s", dt, dy, slope)).color(self.col_accent()));
-                    } else {
-                        ui.label(RichText::new("\u{2014}").color(self.col_accent()));
-                    }
-                    if ui.button("Clear").clicked() { self.click_points.clear(); }
-                }
-
-                // "..." overflow menu — always visible, always contains Smooth + Volume + Clear Chart
-                ui.add_space(4.0);
-                ui.menu_button("...", |ui| {
-                    ui.set_min_width(200.0);
-                    ui.label(RichText::new("Smooth:").color(self.col_gray()));
-                    egui::ComboBox::from_id_source("cb_smo").selected_text(&self.chart_smooth_val).show_ui(ui, |ui| {
-                        for val in ["None", "SMA-5", "SMA-20", "EMA-Fast", "EMA-Slow", "DEMA", "Median-5", "Kalman", "Savitzky-Golay"] {
-                            ui.selectable_value(&mut self.chart_smooth_val, val.to_string(), val);
+                // ── Right section: [Delta fills space] [Clear] [...] ─────────
+                // Use right_to_left so "..." lands on the far right, "Clear" just
+                // left of it, and the Delta label fills all remaining space.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // "..." menu — far right
+                    ui.menu_button("...", |ui| {
+                        ui.set_min_width(200.0);
+                        ui.label(RichText::new("Smooth:").color(self.col_gray()));
+                        egui::ComboBox::from_id_source("cb_smo").selected_text(&self.chart_smooth_val).show_ui(ui, |ui| {
+                            for val in ["None", "SMA-5", "SMA-20", "EMA-Fast", "EMA-Slow", "DEMA", "Median-5", "Kalman", "Savitzky-Golay"] {
+                                ui.selectable_value(&mut self.chart_smooth_val, val.to_string(), val);
+                            }
+                        });
+                        ui.add_space(4.0);
+                        ui.label(RichText::new("Volume unit:").color(self.col_gray()));
+                        egui::ComboBox::from_id_source("cb_volunit").selected_text(if self.vol_unit_ml { "mL" } else { "L" }).show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.vol_unit_ml, false, "L");
+                            ui.selectable_value(&mut self.vol_unit_ml, true, "mL");
+                        });
+                        ui.separator();
+                        if ui.button("Clear Chart").clicked() {
+                            self.p_buf.clear(); self.h_buf.clear();
+                            self.v_buf.clear(); self.f_buf.clear();
+                            self.click_points.clear();
+                            self.chart_cache_gen = self.chart_cache_gen.wrapping_add(1);
+                            ui.close_menu();
                         }
-                    });
-                    ui.add_space(4.0);
-                    ui.label(RichText::new("Volume unit:").color(self.col_gray()));
-                    egui::ComboBox::from_id_source("cb_volunit").selected_text(if self.vol_unit_ml { "mL" } else { "L" }).show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.vol_unit_ml, false, "L");
-                        ui.selectable_value(&mut self.vol_unit_ml, true, "mL");
-                    });
-                    ui.separator();
-                    if ui.button("Clear Chart").clicked() {
-                        self.p_buf.clear(); self.h_buf.clear();
-                        self.v_buf.clear(); self.f_buf.clear();
-                        self.click_points.clear();
-                        self.chart_cache_gen = self.chart_cache_gen.wrapping_add(1);
-                        ui.close_menu();
-                    }
-                    if !show_extras {
                         ui.separator();
                         if ui.button("Export CSV").on_hover_text("Export current chart data to CSV").clicked() {
                             let fname = format!("chart_export_{}.csv", Local::now().format("%Y%m%d_%H%M%S"));
@@ -1884,24 +1856,30 @@ impl eframe::App for CisternApp {
                             }
                             ui.close_menu();
                         }
-                        if ui.button("Reset Zoom").on_hover_text("Reset chart pan/zoom to fit all data").clicked() {
-                            self.reset_zoom = true;
-                            ui.close_menu();
+                        if !show_extras {
+                            if ui.button("Reset Zoom").on_hover_text("Reset chart pan/zoom to fit all data").clicked() {
+                                self.reset_zoom = true;
+                                ui.close_menu();
+                            }
                         }
-                    }
-                    if !show_delta {
-                        ui.separator();
-                        ui.label(RichText::new("Delta:").color(self.col_gray()));
-                        if self.click_points.len() == 2 {
-                            let dt = (self.click_points[1][0] - self.click_points[0][0]).abs();
-                            let dy = self.click_points[1][1] - self.click_points[0][1];
-                            let slope = if dt > 0.001 { dy / dt } else { 0.0 };
-                            ui.label(RichText::new(format!("{:.1}s | Δ{:.2} | {:.3}/s", dt, dy, slope)).color(self.col_accent()));
-                        } else {
-                            ui.label(RichText::new("\u{2014}").color(self.col_accent()));
-                        }
-                        if ui.button("Clear Delta").clicked() { self.click_points.clear(); ui.close_menu(); }
-                    }
+                    });
+
+                    // "Clear" delta button — just left of "..."
+                    if ui.button("Clear").clicked() { self.click_points.clear(); }
+
+                    // Delta label fills all remaining space between left items and "Clear"
+                    let (delta_text, delta_color) = if self.click_points.len() == 2 {
+                        let dt = (self.click_points[1][0] - self.click_points[0][0]).abs();
+                        let dy = self.click_points[1][1] - self.click_points[0][1];
+                        let slope = if dt > 0.001 { dy / dt } else { 0.0 };
+                        (format!("Delta: {:.1}s | \u{0394}{:.2} | {:.3}/s", dt, dy, slope), self.col_accent())
+                    } else {
+                        ("Delta: \u{2014}".to_string(), self.col_gray())
+                    };
+                    let fill_w = ui.available_width().max(0.0);
+                    let row_h  = ui.spacing().interact_size.y;
+                    ui.add_sized([fill_w, row_h],
+                        egui::Label::new(RichText::new(delta_text).color(delta_color)));
                 });
             });
             ui.add_space(4.0);
