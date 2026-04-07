@@ -1,0 +1,58 @@
+name: Build Rust App
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - 'cistern_analytics/**'
+      - 'icon.ico'
+      - '.github/workflows/build-rust.yml'
+  workflow_dispatch:   # allow manual trigger from GitHub Actions tab
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            cistern_analytics/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('cistern_analytics/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build release binary
+        working-directory: cistern_analytics
+        run: cargo build --release
+
+      - name: Verify binary was created
+        run: |
+          if (Test-Path "cistern_analytics\target\release\cistern_analytics.exe") {
+            $size = (Get-Item "cistern_analytics\target\release\cistern_analytics.exe").length / 1MB
+            Write-Host "cistern_analytics.exe built successfully ($([math]::Round($size,1)) MB)"
+          } else {
+            Write-Error "Build failed — cistern_analytics.exe not found"
+            exit 1
+          }
+
+      - name: Upload EXE as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CisternAnalytics-Rust-windows
+          path: cistern_analytics/target/release/cistern_analytics.exe
+          retention-days: 30
