@@ -4,9 +4,15 @@
 
   [![IFM PI1789](https://img.shields.io/badge/IFM-PI1789-blue)](#)
   [![IFM AL1060](https://img.shields.io/badge/IFM-AL1060-green)](#)
-  [![Python](https://img.shields.io/badge/Language-Python-00599C?logo=python)](#)
-  [![DearPyGui](https://img.shields.io/badge/Frontend-DearPyGui-F7DF1E)](#)
+  [![Python](https://img.shields.io/badge/Python-3.10+-00599C?logo=python&logoColor=white)](#)
+  [![Rust](https://img.shields.io/badge/Rust-stable-CE422B?logo=rust&logoColor=white)](#)
+  [![Build Python EXE](https://github.com/n3tk0/Pressure_sensor/actions/workflows/build-exe.yml/badge.svg)](../../actions/workflows/build-exe.yml)
+  [![Build Rust App](https://github.com/n3tk0/Pressure_sensor/actions/workflows/build-rust.yml/badge.svg)](../../actions/workflows/build-rust.yml)
 </div>
+
+---
+
+Two implementations are provided — a **Python/DearPyGui** reference app and a **Rust/egui** production app — sharing the same sensor protocol, calibration model, and EN 14055 test logic.
 
 ---
 
@@ -28,10 +34,10 @@
 - Live water level (mm), volume (L), pressure (bar/mbar/kPa), temperature (°C) and flow rate (L/s)
 - Sensor health status indicator (OK / Fault / Over-range / Under-range)
 - 9 smoothing algorithms: None, SMA-5, SMA-20, EMA-Fast, EMA-Slow, DEMA, Median-5, Kalman, Savitzky-Golay
-- Switchable chart axis: Height (mm), Volume (L), Flow Rate (L/s)
+- Switchable chart Y-axis: Height (mm), Volume (L), Flow Rate (L/s)
 - Full scrollable graph history — pan and zoom into any past moment
 - Delta measurement — click two points on the chart to measure the difference
-- Dark and light theme (Catppuccin-inspired)
+- Dark and light theme (Catppuccin-inspired palette)
 
 ### EN 14055:2015 compliance testing
 
@@ -57,19 +63,37 @@ Seat  (seals minimum — V = 0 L calibration point)
 - CWL − OF ≤ 10 mm
 - Meniscus − OF ≤ 5 mm
 - Air gap note (ruler measurement per §5.2.7)
-- Full flush ≤ 6 L, part flush ≤ 4 L
+- Full and part flush volume compliance per selected cistern class/type
 
-### Flush volume measurement
-- Start/stop timing of full and part flush cycles
-- EN 14055 V2 flow rate method: skips first 1 L and last 2 L of each flush
-- Auto-stop when cistern level rises again (refill detected)
-- Results table with volume, duration, average rate, and EN 14055 effective rate
+### Flush volume measurement — ARM auto-detection
+
+Flush start and stop are detected **fully automatically** — no manual timing required:
+
+1. Press **ARM Full Flush** when the cistern is full and ready.
+2. Flush the cistern. The ARM detector watches for a ≥ 1.5 mm water-level drop and retroactively anchors the measurement start to the local maximum in the pre-trigger buffer.
+3. Recording stops automatically once the level rises ≥ 2 mm above the floor for 15 consecutive samples (≥ 3 s minimum duration).
+4. After the full flush is saved, press **ARM Part Flush** and repeat.
+
+Pairs of full + part flush results are stored together. The **EN L/s** rate uses the EN 14055 V2 skip-window method — the first 1 L and last 2 L of each flush are excluded from the flow-rate calculation.
+
+The only manual inputs are the **cistern class** and **type variant** — values that are defined by the product specification, not measurable by the sensor:
+
+| Class | Variant | Full flush | Part flush |
+|-------|---------|------------|------------|
+| Class 1 | Type 6 | 6.0–6.5 L | 3.0–4.0 L |
+| Class 1 | Type 5 | 4.5–5.5 L | 3.0–4.0 L |
+| Class 1 | Type 4 | 4.0–4.5 L | 2.0–3.0 L |
+| Class 2 | Max 6.0 L | ≤ 6.0 L | ≤ 2/3 full |
+| Class 2 | 4.5 L | 4.15–4.85 L | ≤ 2/3 full |
+| Class 2 | 4.0 L | 3.70–4.30 L | ≤ 2/3 full |
+
+Each result row is colour-coded **green (PASS)** or **red (FAIL)** per column.
 
 ### Chart
 - Switchable Y-axis: Height (mm), Volume (L), or Flow Rate (L/s)
 - Horizontal limit lines: NWL, MWL, CWL, Meniscus, Overflow
 - Customisable line colours via dialog
-- Drag lines to adjust NWL and CWL while paused
+- Vertical markers at each recorded flush event
 - Click two points to measure the difference (Delta)
 
 ### Calibration profiles
@@ -80,7 +104,8 @@ Seat  (seals minimum — V = 0 L calibration point)
 
 ### Data export
 - CSV logging: timestamp, pressure, height, volume, flow rate
-- Atomic file writes (no partial files on crash)
+- Auto-rollover at 10 MB — continuous logging without file-size issues
+- Export last N minutes as a snapshot CSV
 - Chart screenshots (PNG export)
 
 ---
@@ -120,50 +145,77 @@ Open **Settings → Edit Calibration Profile** and add pressure/height/volume po
 
 ## Installation
 
-### Prerequisites
+### Python app
 
-- Python 3.10+ (tested on 3.11 and 3.14)
-- Windows 10/11
-
-### Run from source
+**Prerequisites:** Python 3.10+ on Windows 10/11.
 
 ```bash
 pip install dearpygui pyserial
 python main.py
 ```
 
-### Build single-file Windows EXE
+### Rust app
 
-#### Option 1: Local build
+**Prerequisites:** [Rust stable toolchain](https://rustup.rs/) on Windows 10/11.
 
+```bash
+cd cistern_analytics
+cargo run --release
+```
+
+---
+
+## Building
+
+### Option 1: Local build
+
+**Python EXE:**
 ```bash
 pip install pyinstaller dearpygui pyserial
 pyinstaller main.spec --clean --noconfirm
+# Output: dist/CisternAnalytics.exe
 ```
 
-The resulting `CisternAnalytics.exe` will be in the `dist/` folder. It bundles the Samsung Sans fonts and application icon. No console window.
+**Rust EXE:**
+```bash
+cd cistern_analytics
+cargo build --release
+# Output: cistern_analytics/target/release/cistern_analytics.exe
+```
 
-#### Option 2: GitHub Actions (automatic)
+### Option 2: GitHub Actions (automatic)
 
-Every push to `main`/`master` that changes source files triggers an automatic build via GitHub Actions. Download the latest EXE from [Actions → Build Windows EXE → Artifacts](../../actions/workflows/build-exe.yml).
+Every push to `main`/`master` that changes source files triggers an automatic build. Download the latest EXE from the **Actions** tab:
 
-You can also trigger a build manually from the Actions tab using **workflow_dispatch**.
+- [Build Windows EXE (Python)](../../actions/workflows/build-exe.yml) — artifact: `CisternAnalytics-windows`
+- [Build Rust App (Windows)](../../actions/workflows/build-rust.yml) — artifact: `CisternAnalytics-Rust-windows`
+
+Both workflows can also be triggered manually using **workflow_dispatch**.
 
 ---
 
 ## Project structure
 
 ```
-main.py           — Application entry point and DearPyGui UI
-sensor_core.py    — Sensor communication, data processing, EN 14055 logic
-dpg_theme.py      — Font loading, theme setup
-main.spec         — PyInstaller build configuration
-icon.ico          — Application icon
-fonts/            — Samsung Sans TTF fonts
-config/           — Runtime settings and default profile (gitignored)
-exports/          — CSV data exports (gitignored)
-screenshots/      — README images
-tests/            — Unit tests
+main.py                     — Python app entry point and DearPyGui UI
+sensor_core.py              — Sensor communication, data processing, EN 14055 logic
+dpg_theme.py                — Font loading, theme setup
+main.spec                   — PyInstaller build configuration
+icon.ico                    — Application icon
+fonts/                      — Samsung Sans TTF fonts
+config/                     — Runtime settings and default profile (gitignored)
+exports/                    — CSV data exports (gitignored)
+screenshots/                — README images
+tests/                      — Unit tests
+
+cistern_analytics/          — Rust/egui app
+  src/
+    main.rs                 — Entry point, window setup
+    app.rs                  — UI, state machine, event loop
+    logic.rs                — EN 14055 validation, flush result types
+    sensor.rs               — Serial sensor driver (background thread)
+  build.rs                  — Embeds icon.ico into Windows EXE via winres
+  Cargo.toml
 ```
 
 ---
