@@ -126,8 +126,54 @@ pub fn validate_flush(
             (_, true) => last_full_vol_l
                 .map_or(false, |fv| measured_vol_l <= (2.0 / 3.0) * fv),
             _ => false, // Class 1 variant mis-selected with Class 2
-        },
     }
+}
+
+pub fn get_en14055_skip_volumes(
+    class: CisternClass,
+    variant: CisternTypeVariant,
+    is_part_flush: bool,
+) -> (f64, f64) {
+    let mut v1 = 1.0;
+    let mut v3 = 2.0;
+
+    match class {
+        CisternClass::Class2 => {
+            if !is_part_flush {
+                v1 = 0.5;
+                v3 = 0.5;
+            } else {
+                v1 = 1.0;
+                v3 = 0.5;
+            }
+        }
+        CisternClass::Class1 => {
+            if !is_part_flush {
+                match variant {
+                    CisternTypeVariant::Type6 => {
+                        v1 = 1.0;
+                        v3 = 2.0;
+                    }
+                    CisternTypeVariant::Type5 => {
+                        v1 = 1.0;
+                        v3 = 1.0;
+                    }
+                    CisternTypeVariant::Type4 => {
+                        v1 = 1.0;
+                        v3 = 1.0;
+                    }
+                    _ => {
+                        v1 = 1.0;
+                        v3 = 2.0;
+                    }
+                }
+            } else {
+                v1 = 1.0;
+                v3 = 0.5;
+            }
+        }
+    }
+    (v1, v3)
 }
 
 // ── EN 14055 constants ─────────────────────────────────────────────────

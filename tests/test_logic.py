@@ -599,25 +599,25 @@ class TestRunComplianceChecks:
         assert air_gap == pytest.approx(15.0)
 
     def test_full_flush_pass(self):
-        p = self._make_profile()
+        p = self._make_profile(cistern_class=2)
         flushes = [make_flush("Full", 5.5) for _ in range(3)]
         results, _ = sa.run_compliance_checks(p, flushes)
         assert any("[PASS]" in r and "Full flush" in r for r in results)
 
     def test_full_flush_fail(self):
-        p = self._make_profile()
+        p = self._make_profile(cistern_class=2)
         flushes = [make_flush("Full", 6.5) for _ in range(3)]
         results, _ = sa.run_compliance_checks(p, flushes)
         assert any("[FAIL]" in r and "Full flush" in r for r in results)
 
     def test_part_flush_pass(self):
-        p = self._make_profile()
+        p = self._make_profile(cistern_class=2)
         flushes = [make_flush("Part", 3.5) for _ in range(3)]
         results, _ = sa.run_compliance_checks(p, flushes)
         assert any("[PASS]" in r and "Part flush" in r for r in results)
 
     def test_part_flush_fail(self):
-        p = self._make_profile()
+        p = self._make_profile(cistern_class=2)
         flushes = [make_flush("Part", 4.5) for _ in range(3)]
         results, _ = sa.run_compliance_checks(p, flushes)
         assert any("[FAIL]" in r and "Part flush" in r for r in results)
@@ -700,3 +700,50 @@ class TestTickCwlAuto:
         assert result is True
         assert app.cwl_auto_state == "DONE"
         assert app.profile.cwl > 0.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# get_en14055_skip_volumes() and get_en14055_volume_limits()
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestEN14055StandardCalculations:
+    def test_get_en14055_skip_volumes(self):
+        # Class 1 full flush
+        assert sa.get_en14055_skip_volumes(9.0, 1, False) == (1.0, 5.0)
+        assert sa.get_en14055_skip_volumes(7.0, 1, False) == (1.0, 3.0)
+        assert sa.get_en14055_skip_volumes(6.0, 1, False) == (1.0, 2.0)
+        assert sa.get_en14055_skip_volumes(5.0, 1, False) == (1.0, 1.0)
+        assert sa.get_en14055_skip_volumes(4.0, 1, False) == (1.0, 1.0)
+
+        # Class 1 part flush
+        assert sa.get_en14055_skip_volumes(6.0, 1, True) == (1.0, 0.5)
+
+        # Class 2 full flush (Max 6.0L, 4.5L, 4.0L)
+        assert sa.get_en14055_skip_volumes(6.0, 2, False) == (0.5, 0.5)
+        assert sa.get_en14055_skip_volumes(4.5, 2, False) == (0.5, 0.5)
+
+        # Class 2 part flush
+        assert sa.get_en14055_skip_volumes(6.0, 2, True) == (1.0, 0.5)
+        assert sa.get_en14055_skip_volumes(4.5, 2, True) == (1.0, 0.5)
+
+    def test_get_en14055_volume_limits(self):
+        # Class 1 full flush limits
+        assert sa.get_en14055_volume_limits(9.0, 1, False) == (8.5, 9.0)
+        assert sa.get_en14055_volume_limits(6.0, 1, False) == (6.0, 6.5)
+        assert sa.get_en14055_volume_limits(4.0, 1, False) == (4.0, 4.5)
+
+        # Class 1 part flush limits
+        assert sa.get_en14055_volume_limits(9.0, 1, True) == (3.0, 4.5)
+        assert sa.get_en14055_volume_limits(6.0, 1, True) == (3.0, 4.0)
+        assert sa.get_en14055_volume_limits(4.0, 1, True) == (2.0, 3.0)
+
+        # Class 2 full flush limits
+        assert sa.get_en14055_volume_limits(6.0, 2, False) == (0.0, 6.0)
+        assert sa.get_en14055_volume_limits(4.5, 2, False) == (4.15, 4.85)
+        assert sa.get_en14055_volume_limits(4.0, 2, False) == (3.70, 4.30)
+
+        # Class 2 part flush limits (<= 2/3 of full flush volume)
+        # Without avg_full_vol (defaults to nominal volume)
+        assert sa.get_en14055_volume_limits(6.0, 2, True) == (0.0, 4.0)
+        # With avg_full_vol (2/3 of 5.4 = 3.6)
+        assert sa.get_en14055_volume_limits(6.0, 2, True, avg_full_vol=5.4) == (0.0, 3.6)

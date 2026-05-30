@@ -1,6 +1,6 @@
 use crate::sensor::{SensorCore, SensorEvent};
 use crate::logic::{CisternProfile, CalibrationPoint, FlushResult, CisternClass, CisternTypeVariant,
-                   run_compliance_checks, validate_flush, smooth, smooth_last};
+                   run_compliance_checks, validate_flush, smooth, smooth_last, get_en14055_skip_volumes};
 use eframe::egui;
 use egui::{Color32, RichText, Key, Modifiers};
 use egui_extras::{TableBuilder, Column};
@@ -1152,9 +1152,10 @@ impl CisternApp {
         let vol_l  = (start_v - end_v).abs();
         let time_s = (end_t - start_t).abs();
 
-        // EN 14055 V2: skip first 1L and last 2L from rate window
-        let v_skip_start = start_v - 1.0;  // volume after removing first 1L consumed
-        let v_skip_end   = end_v   + 2.0;  // volume before last 2L consumed
+        // EN 14055 skip volumes based on class and variant
+        let (v1, v3) = get_en14055_skip_volumes(self.cistern_class, self.cistern_type_variant, !is_full);
+        let v_skip_start = start_v - v1;
+        let v_skip_end   = end_v   + v3;
         let t1 = self.flush_record_buf.iter()
             .find(|s| s[2] <= v_skip_start)
             .map(|s| s[0]);
@@ -1165,7 +1166,7 @@ impl CisternApp {
             (Some(ta), Some(tb)) if tb > ta && (v_skip_start - v_skip_end) > 0.0 => {
                 Some((v_skip_start - v_skip_end) / (tb - ta))
             }
-            _ => if vol_l > 3.0 && time_s > 0.0 { Some((vol_l - 3.0) / time_s) } else { None },
+            _ => if vol_l > (v1 + v3 + 0.1) && time_s > 0.0 { Some((vol_l - (v1 + v3)) / time_s) } else { None },
         };
 
         let t_now = self.flush_arm_min_t;
