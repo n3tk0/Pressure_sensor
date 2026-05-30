@@ -92,6 +92,18 @@ pub struct FlushResult {
     pub compliance_pass: Option<bool>,
 }
 
+/// A paired full + part flush measurement (EN 14055 §5.2.1).
+#[derive(Clone, Debug)]
+pub struct FlushPair {
+    pub full: FlushResult,
+    pub part: FlushResult,
+}
+
+/// Flatten paired flushes into a flat `Vec<FlushResult>` for the compliance checks.
+pub fn flush_pairs_to_results(pairs: &[FlushPair]) -> Vec<FlushResult> {
+    pairs.iter().flat_map(|p| [p.full.clone(), p.part.clone()]).collect()
+}
+
 /// Validate a single flush measurement against EN 14055 volume limits.
 ///
 /// * `class`             – cistern classification (Class1 / Class2)
@@ -135,59 +147,94 @@ pub fn get_en14055_skip_volumes(
     variant: CisternTypeVariant,
     is_part_flush: bool,
 ) -> (f64, f64) {
-    let mut v1 = 1.0;
-    let mut v3 = 2.0;
-
     match class {
+        // Class 2 (§6.10.4): symmetric 0.5 L window on full, 1.0/0.5 L on part.
         CisternClass::Class2 => {
-            if !is_part_flush {
-                v1 = 0.5;
-                v3 = 0.5;
-            } else {
-                v1 = 1.0;
-                v3 = 0.5;
-            }
+            if !is_part_flush { (0.5, 0.5) } else { (1.0, 0.5) }
         }
+        // Class 1 (§5.3.3.3): 1 L start skip; finish skip varies by type.
         CisternClass::Class1 => {
             if !is_part_flush {
                 match variant {
-                    CisternTypeVariant::Type6 => {
-                        v1 = 1.0;
-                        v3 = 2.0;
-                    }
-                    CisternTypeVariant::Type5 => {
-                        v1 = 1.0;
-                        v3 = 1.0;
-                    }
-                    CisternTypeVariant::Type4 => {
-                        v1 = 1.0;
-                        v3 = 1.0;
-                    }
-                    _ => {
-                        v1 = 1.0;
-                        v3 = 2.0;
-                    }
+                    CisternTypeVariant::Type6 => (1.0, 2.0),
+                    CisternTypeVariant::Type5 => (1.0, 1.0),
+                    CisternTypeVariant::Type4 => (1.0, 1.0),
+                    _ => (1.0, 2.0),
                 }
             } else {
-                v1 = 1.0;
-                v3 = 0.5;
+                (1.0, 0.5)
             }
         }
     }
-    (v1, v3)
+}
+
+/// Dynamic EN 14055 volume limits (Table 3) for a given class/variant — the Rust
+/// counterpart of the Python `get_en14055_volume_limits()`.
+///
+/// Returns `(min_limit, max_limit)` in litres. For Class 2 part flushes the upper
+/// bound is 2/3 of the *measured* full-flush average, so callers must pass it via
+/// `avg_full_vol`; when it is absent the nominal-volume fallback is used.
+pub fn get_en14055_volume_limits(
+    class: CisternClass,
+    variant: CisternTypeVariant,
+    is_part_flush: bool,
+    avg_full_vol: Option<f64>,
+) -> (f64, f64) {
+    match class {
+        // ── Class 2 ─────────────────────────────────────────────────────
+        CisternClass::Class2 => {
+            if !is_part_flush {
+                match variant {
+                    CisternTypeVariant::Max6_0 => (0.0, 6.0),
+                    CisternTypeVariant::L4_5   => (4.15, 4.85),
+                    CisternTypeVariant::L4_0   => (3.70, 4.30),
+                    _ => (0.0, 6.0), // Class 1 variant mis-selected with Class 2
+                }
+            } else {
+                // Part flush: ≤ 2/3 × measured full-flush average (nominal fallback).
+                let basis = avg_full_vol.unwrap_or_else(|| match variant {
+                    CisternTypeVariant::L4_5 => 4.5,
+                    CisternTypeVariant::L4_0 => 4.0,
+                    _ => 6.0,
+                });
+                (0.0, (2.0 / 3.0) * basis)
+            }
+        }
+        // ── Class 1 (Table 3 absolute ranges) ───────────────────────────
+        CisternClass::Class1 => {
+            if !is_part_flush {
+                match variant {
+                    CisternTypeVariant::Type6 => (6.0, 6.5),
+                    CisternTypeVariant::Type5 => (4.5, 5.5),
+                    CisternTypeVariant::Type4 => (4.0, 4.5),
+                    _ => (0.0, 6.0), // Class 2 variant mis-selected with Class 1
+                }
+            } else {
+                match variant {
+                    CisternTypeVariant::Type6 => (3.0, 4.0),
+                    CisternTypeVariant::Type5 => (3.0, 4.0),
+                    CisternTypeVariant::Type4 => (2.0, 3.0),
+                    _ => (0.0, 4.0),
+                }
+            }
+        }
+    }
 }
 
 // ── EN 14055 constants ─────────────────────────────────────────────────
 const EN14055_REQUIRED_FLUSH_COUNT: usize = 3;
-const EN14055_FULL_FLUSH_MAX_L: f64 = 6.0;
-const EN14055_PART_FLUSH_MAX_L: f64 = 4.0;
 const EN14055_SAFETY_MARGIN_MIN_MM: f64 = 20.0;
 const EN14055_MWL_MAX_ABOVE_OF_MM: f64 = 20.0;
 const EN14055_CWL_MAX_ABOVE_OF_MM: f64 = 10.0;
 const EN14055_MENISCUS_MAX_ABOVE_OF_MM: f64 = 5.0;
 const EN14055_AIR_GAP_MIN_MM: f64 = 20.0;
 
-pub fn run_compliance_checks(profile: &CisternProfile, results: &[FlushResult]) -> Vec<String> {
+pub fn run_compliance_checks(
+    profile: &CisternProfile,
+    class: CisternClass,
+    variant: CisternTypeVariant,
+    results: &[FlushResult],
+) -> Vec<String> {
     let mut flags = Vec::new();
     let p = profile;
 
@@ -265,27 +312,37 @@ pub fn run_compliance_checks(profile: &CisternProfile, results: &[FlushResult]) 
         let full_flushes: Vec<&FlushResult> = results.iter().filter(|r| r.is_full).collect();
         let part_flushes: Vec<&FlushResult> = results.iter().filter(|r| !r.is_full).collect();
 
+        // Average full-flush volume, used both for the full-flush check and as the
+        // Class 2 part-flush limit basis (2/3 of measured full flush).
+        let avg_full_opt: Option<f64> = if full_flushes.is_empty() {
+            None
+        } else {
+            Some(full_flushes.iter().map(|f| f.vol_l).sum::<f64>() / full_flushes.len() as f64)
+        };
+
         // Full flush checks
-        if !full_flushes.is_empty() {
+        if let Some(avg_full) = avg_full_opt {
             if full_flushes.len() < EN14055_REQUIRED_FLUSH_COUNT {
                 flags.push(format!(
                     "[WARN] Full flush: only {}/{} measurements (§5.2.1 requires 3)",
                     full_flushes.len(), EN14055_REQUIRED_FLUSH_COUNT
                 ));
             }
-            let avg_full = full_flushes.iter().map(|f| f.vol_l).sum::<f64>() / full_flushes.len() as f64;
-            if avg_full <= EN14055_FULL_FLUSH_MAX_L {
-                flags.push(format!("[PASS] Full flush avg: {:.2} L (limit {:.1} L)", avg_full, EN14055_FULL_FLUSH_MAX_L));
-            } else {
-                flags.push(format!("[FAIL] Full flush avg: {:.2} L (limit {:.1} L)", avg_full, EN14055_FULL_FLUSH_MAX_L));
-            }
-            // EN14055 flow rate
+            let (min_l, max_l) = get_en14055_volume_limits(class, variant, false, None);
+            let tag = if (min_l..=max_l).contains(&avg_full) { "PASS" } else { "FAIL" };
+            flags.push(format!("[{}] Full flush avg: {:.2} L (limit {:.2}–{:.2} L)", tag, avg_full, min_l, max_l));
+            // EN 14055 flow rate — Class 2 enforces ≥ 1.85 L/s (§6.6), Class 1 informational.
             let en_rates: Vec<f64> = full_flushes.iter()
                 .filter_map(|f| f.en14055_rate)
                 .collect();
             if !en_rates.is_empty() {
                 let avg_rate = en_rates.iter().sum::<f64>() / en_rates.len() as f64;
-                flags.push(format!("[INFO] Full flush EN 14055 flow rate (V2 method): {:.3} L/s", avg_rate));
+                if class == CisternClass::Class2 {
+                    let tag = if avg_rate >= 1.85 { "PASS" } else { "FAIL" };
+                    flags.push(format!("[{}] Full flush EN 14055 flow rate (V2 method): {:.3} L/s (limit ≥ 1.85 L/s)", tag, avg_rate));
+                } else {
+                    flags.push(format!("[INFO] Full flush EN 14055 flow rate (V2 method): {:.3} L/s", avg_rate));
+                }
             }
             // Water temperature
             let temps: Vec<f64> = full_flushes.iter().filter_map(|f| f.temp_c).collect();
@@ -305,10 +362,27 @@ pub fn run_compliance_checks(profile: &CisternProfile, results: &[FlushResult]) 
                 ));
             }
             let avg_part = part_flushes.iter().map(|f| f.vol_l).sum::<f64>() / part_flushes.len() as f64;
-            if avg_part <= EN14055_PART_FLUSH_MAX_L {
-                flags.push(format!("[PASS] Part flush avg: {:.2} L (limit {:.1} L)", avg_part, EN14055_PART_FLUSH_MAX_L));
+            if class == CisternClass::Class2 && avg_full_opt.is_none() {
+                // Class 2 part limit is 2/3 of the measured full-flush average, so it
+                // cannot be evaluated until a full flush has been recorded.
+                flags.push(format!("[----] Part flush avg: {:.2} L — record a full flush first (Class 2 part limit is ⅔ of measured full-flush average)", avg_part));
             } else {
-                flags.push(format!("[FAIL] Part flush avg: {:.2} L (limit {:.1} L)", avg_part, EN14055_PART_FLUSH_MAX_L));
+                let (min_l, max_l) = get_en14055_volume_limits(class, variant, true, avg_full_opt);
+                let tag = if (min_l..=max_l).contains(&avg_part) { "PASS" } else { "FAIL" };
+                flags.push(format!("[{}] Part flush avg: {:.2} L (limit {:.2}–{:.2} L)", tag, avg_part, min_l, max_l));
+            }
+            // EN 14055 flow rate — Class 2 enforces ≥ 1.60 L/s (§6.6), Class 1 informational.
+            let en_rates: Vec<f64> = part_flushes.iter()
+                .filter_map(|f| f.en14055_rate)
+                .collect();
+            if !en_rates.is_empty() {
+                let avg_rate = en_rates.iter().sum::<f64>() / en_rates.len() as f64;
+                if class == CisternClass::Class2 {
+                    let tag = if avg_rate >= 1.60 { "PASS" } else { "FAIL" };
+                    flags.push(format!("[{}] Part flush EN 14055 flow rate (V2 method): {:.3} L/s (limit ≥ 1.60 L/s)", tag, avg_rate));
+                } else {
+                    flags.push(format!("[INFO] Part flush EN 14055 flow rate (V2 method): {:.3} L/s", avg_rate));
+                }
             }
         }
     }
@@ -587,7 +661,7 @@ mod tests {
     fn compliance_safety_margin_pass() {
         let mut p = CisternProfile::default();
         p.overflow = 250.0; p.mwl = 220.0;
-        let flags = run_compliance_checks(&p, &[]);
+        let flags = run_compliance_checks(&p, CisternClass::Class2, CisternTypeVariant::Max6_0, &[]);
         assert!(flags.iter().any(|f| f.contains("[PASS]") && f.contains("Safety margin")));
     }
 
@@ -595,7 +669,7 @@ mod tests {
     fn compliance_safety_margin_fail() {
         let mut p = CisternProfile::default();
         p.overflow = 250.0; p.mwl = 235.0;
-        let flags = run_compliance_checks(&p, &[]);
+        let flags = run_compliance_checks(&p, CisternClass::Class2, CisternTypeVariant::Max6_0, &[]);
         assert!(flags.iter().any(|f| f.contains("[FAIL]") && f.contains("Safety margin")));
     }
 
@@ -603,7 +677,7 @@ mod tests {
     fn compliance_air_gap_pass() {
         let mut p = CisternProfile::default();
         p.water_discharge = 300.0; p.cwl = 275.0;
-        let flags = run_compliance_checks(&p, &[]);
+        let flags = run_compliance_checks(&p, CisternClass::Class2, CisternTypeVariant::Max6_0, &[]);
         assert!(flags.iter().any(|f| f.contains("[PASS]") && f.contains("Air gap")));
     }
 
@@ -611,7 +685,7 @@ mod tests {
     fn compliance_air_gap_fail() {
         let mut p = CisternProfile::default();
         p.water_discharge = 300.0; p.cwl = 285.0;
-        let flags = run_compliance_checks(&p, &[]);
+        let flags = run_compliance_checks(&p, CisternClass::Class2, CisternTypeVariant::Max6_0, &[]);
         assert!(flags.iter().any(|f| f.contains("[FAIL]") && f.contains("Air gap")));
     }
 
@@ -619,7 +693,7 @@ mod tests {
     fn compliance_full_flush_pass() {
         let p = CisternProfile::default();
         let results: Vec<FlushResult> = (0..3).map(|_| full_flush(5.5)).collect();
-        let flags = run_compliance_checks(&p, &results);
+        let flags = run_compliance_checks(&p, CisternClass::Class2, CisternTypeVariant::Max6_0, &results);
         assert!(flags.iter().any(|f| f.contains("[PASS]") && f.contains("Full flush")));
     }
 
@@ -627,15 +701,16 @@ mod tests {
     fn compliance_full_flush_fail() {
         let p = CisternProfile::default();
         let results: Vec<FlushResult> = (0..3).map(|_| full_flush(6.5)).collect();
-        let flags = run_compliance_checks(&p, &results);
+        let flags = run_compliance_checks(&p, CisternClass::Class2, CisternTypeVariant::Max6_0, &results);
         assert!(flags.iter().any(|f| f.contains("[FAIL]") && f.contains("Full flush")));
     }
 
     #[test]
     fn compliance_part_flush_pass() {
+        // Class 1 part flush has absolute limits (Type 6: 3.0–4.0 L) and needs no full flush.
         let p = CisternProfile::default();
         let results: Vec<FlushResult> = (0..3).map(|_| part_flush(3.5)).collect();
-        let flags = run_compliance_checks(&p, &results);
+        let flags = run_compliance_checks(&p, CisternClass::Class1, CisternTypeVariant::Type6, &results);
         assert!(flags.iter().any(|f| f.contains("[PASS]") && f.contains("Part flush")));
     }
 
@@ -643,7 +718,7 @@ mod tests {
     fn compliance_warns_fewer_than_3_full_flushes() {
         let p = CisternProfile::default();
         let results = vec![full_flush(5.0), full_flush(5.0)];
-        let flags = run_compliance_checks(&p, &results);
+        let flags = run_compliance_checks(&p, CisternClass::Class2, CisternTypeVariant::Max6_0, &results);
         assert!(flags.iter().any(|f| f.contains("[WARN]") && f.contains("Full flush")));
     }
 
@@ -651,7 +726,7 @@ mod tests {
     fn compliance_warns_fewer_than_3_part_flushes() {
         let p = CisternProfile::default();
         let results = vec![part_flush(3.0)];
-        let flags = run_compliance_checks(&p, &results);
+        let flags = run_compliance_checks(&p, CisternClass::Class1, CisternTypeVariant::Type6, &results);
         assert!(flags.iter().any(|f| f.contains("[WARN]") && f.contains("Part flush")));
     }
 
@@ -659,7 +734,7 @@ mod tests {
     fn compliance_residual_wl_info() {
         let mut p = CisternProfile::default();
         p.residual_wl = 42.0;
-        let flags = run_compliance_checks(&p, &[]);
+        let flags = run_compliance_checks(&p, CisternClass::Class2, CisternTypeVariant::Max6_0, &[]);
         assert!(flags.iter().any(|f| f.contains("[INFO]") && f.contains("Residual")));
     }
 
@@ -670,8 +745,51 @@ mod tests {
             is_full: true, vol_l: 5.5, time_s: 10.0,
             en14055_rate: None, temp_c: Some(18.0), compliance_pass: None,
         }).collect();
-        let flags = run_compliance_checks(&p, &results);
+        let flags = run_compliance_checks(&p, CisternClass::Class2, CisternTypeVariant::Max6_0, &results);
         assert!(flags.iter().any(|f| f.contains("[INFO]") && f.to_lowercase().contains("temp")));
+    }
+
+    // ── dynamic EN 14055 volume limits ──────────────────────────────────────
+
+    #[test]
+    fn volume_limits_match_table3() {
+        assert_eq!(get_en14055_volume_limits(CisternClass::Class1, CisternTypeVariant::Type6, false, None), (6.0, 6.5));
+        assert_eq!(get_en14055_volume_limits(CisternClass::Class1, CisternTypeVariant::Type4, true,  None), (2.0, 3.0));
+        assert_eq!(get_en14055_volume_limits(CisternClass::Class2, CisternTypeVariant::L4_5,  false, None), (4.15, 4.85));
+        // Class 2 part flush = 2/3 of measured full-flush average.
+        let (_, max_l) = get_en14055_volume_limits(CisternClass::Class2, CisternTypeVariant::Max6_0, true, Some(5.4));
+        assert!((max_l - 3.6).abs() < 1e-9);
+    }
+
+    #[test]
+    fn compliance_uses_dynamic_class1_full_limit() {
+        // 5.5 L passes for Class 2 (≤6.0) but fails Class 1 Type 6 (6.0–6.5 L).
+        let p = CisternProfile::default();
+        let results: Vec<FlushResult> = (0..3).map(|_| full_flush(5.5)).collect();
+        let flags = run_compliance_checks(&p, CisternClass::Class1, CisternTypeVariant::Type6, &results);
+        assert!(flags.iter().any(|f| f.contains("[FAIL]") && f.contains("Full flush")));
+    }
+
+    #[test]
+    fn compliance_class2_part_without_full_is_incomplete() {
+        // Class 2 part flush cannot be judged before a full-flush average exists.
+        let p = CisternProfile::default();
+        let results: Vec<FlushResult> = (0..3).map(|_| part_flush(3.8)).collect();
+        let flags = run_compliance_checks(&p, CisternClass::Class2, CisternTypeVariant::Max6_0, &results);
+        assert!(flags.iter().any(|f| f.contains("[----]") && f.contains("Part flush")));
+        assert!(!flags.iter().any(|f| (f.contains("[PASS]") || f.contains("[FAIL]")) && f.contains("Part flush")));
+    }
+
+    #[test]
+    fn compliance_class2_full_flow_rate_fails_below_limit() {
+        // Class 2 full flush must reach ≥ 1.85 L/s; a slow rate is flagged FAIL.
+        let p = CisternProfile::default();
+        let results: Vec<FlushResult> = (0..3).map(|_| FlushResult {
+            is_full: true, vol_l: 5.5, time_s: 10.0,
+            en14055_rate: Some(1.2), temp_c: None, compliance_pass: None,
+        }).collect();
+        let flags = run_compliance_checks(&p, CisternClass::Class2, CisternTypeVariant::Max6_0, &results);
+        assert!(flags.iter().any(|f| f.contains("[FAIL]") && f.contains("flow rate")));
     }
 }
 

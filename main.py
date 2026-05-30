@@ -1704,7 +1704,7 @@ def _build_left_panel():
             with dpg.group(horizontal=True):
                 dpg.add_combo(["Class 1", "Class 2"], default_value=f"Class {app.profile.cistern_class}", tag="combo_class", width=145, callback=_on_class_change)
                 dpg.add_spacer(width=10)
-                dpg.add_combo(["4.0", "5.0", "6.0", "7.0", "9.0"], default_value=f"{app.profile.nominal_volume:.1f}", tag="combo_nom_vol", width=145, callback=_on_vol_change)
+                dpg.add_combo(["4.0", "4.5", "5.0", "6.0", "7.0", "9.0"], default_value=f"{app.profile.nominal_volume:.1f}", tag="combo_nom_vol", width=145, callback=_on_vol_change)
             dpg.add_spacer(height=3)
             with dpg.group(horizontal=True):
                 dpg.add_text("Type:", color=COL_GRAY)

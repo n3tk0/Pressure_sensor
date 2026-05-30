@@ -1068,9 +1068,14 @@ def run_compliance_checks(
             if len(part) < EN14055_REQUIRED_FLUSH_COUNT:
                 results.append(f"[WARN] Part flush: only {len(part)}/{EN14055_REQUIRED_FLUSH_COUNT} measurements (§5.2.1 requires 3)")
             avg_part = sum(r["vol"] for r in part) / len(part)
-            min_l, max_l = get_en14055_volume_limits(p.nominal_volume, p.cistern_class, is_part_flush=True, avg_full_vol=avg_full)
-            tag = "PASS" if min_l <= avg_part <= max_l else "FAIL"
-            results.append(f"[{tag}] Part flush avg: {avg_part:.2f} L (limit {min_l:.2f}–{max_l:.2f} L)")
+            if p.cistern_class == 2 and avg_full is None:
+                # Class 2 part limit is 2/3 of the *measured* full-flush average,
+                # so it cannot be evaluated until a full flush has been recorded.
+                results.append(f"[----] Part flush avg: {avg_part:.2f} L — record a full flush first (Class 2 part limit is ⅔ of measured full-flush average)")
+            else:
+                min_l, max_l = get_en14055_volume_limits(p.nominal_volume, p.cistern_class, is_part_flush=True, avg_full_vol=avg_full)
+                tag = "PASS" if min_l <= avg_part <= max_l else "FAIL"
+                results.append(f"[{tag}] Part flush avg: {avg_part:.2f} L (limit {min_l:.2f}–{max_l:.2f} L)")
             
             en_rates = [r["en14055_rate"] for r in part if r.get("en14055_rate") is not None]
             if en_rates:

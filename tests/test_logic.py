@@ -611,16 +611,31 @@ class TestRunComplianceChecks:
         assert any("[FAIL]" in r and "Full flush" in r for r in results)
 
     def test_part_flush_pass(self):
+        # Class 2 part limit is 2/3 of the measured full-flush average, so a full
+        # flush must be present. avg_full = 5.5 → part limit 3.667 L, 3.5 passes.
         p = self._make_profile(cistern_class=2)
-        flushes = [make_flush("Part", 3.5) for _ in range(3)]
+        flushes = [make_flush("Full", 5.5) for _ in range(3)] + \
+                  [make_flush("Part", 3.5) for _ in range(3)]
         results, _ = sa.run_compliance_checks(p, flushes)
         assert any("[PASS]" in r and "Part flush" in r for r in results)
 
     def test_part_flush_fail(self):
+        # avg_full = 5.5 → part limit 3.667 L, 4.5 fails.
         p = self._make_profile(cistern_class=2)
-        flushes = [make_flush("Part", 4.5) for _ in range(3)]
+        flushes = [make_flush("Full", 5.5) for _ in range(3)] + \
+                  [make_flush("Part", 4.5) for _ in range(3)]
         results, _ = sa.run_compliance_checks(p, flushes)
         assert any("[FAIL]" in r and "Part flush" in r for r in results)
+
+    def test_class2_part_flush_without_full_is_incomplete(self):
+        # Class 2 part flush cannot pass before a full flush exists: a 3.8 L part
+        # flush on a nominal 6 L cistern must not be reported as PASS/FAIL until
+        # the measured full-flush average is known.
+        p = self._make_profile(cistern_class=2, nominal_volume=6.0)
+        flushes = [make_flush("Part", 3.8) for _ in range(3)]
+        results, _ = sa.run_compliance_checks(p, flushes)
+        assert any("[----]" in r and "Part flush" in r for r in results)
+        assert not any(("[PASS]" in r or "[FAIL]" in r) and "Part flush" in r for r in results)
 
     def test_warns_fewer_than_3_full_flushes(self):
         p = self._make_profile()
