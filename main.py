@@ -170,7 +170,15 @@ def _toggle_connect():
 
 
 def _on_class_change(sender, app_data):
-    app.profile.cistern_class = int(app_data.replace("Class ", ""))
+    cls = int(app_data.replace("Class ", ""))
+    app.profile.cistern_class = cls
+    # Auto-correct the nominal volume to a valid option for the selected class
+    # (Class 1: 4/5/6/7/9 L; Class 2: 4/4.5/6 L) to prevent invalid combinations.
+    valid = [4.0, 4.5, 6.0] if cls == 2 else [4.0, 5.0, 6.0, 7.0, 9.0]
+    if app.profile.nominal_volume not in valid:
+        app.profile.nominal_volume = 6.0
+        if dpg.does_item_exist("combo_nom_vol"):
+            dpg.set_value("combo_nom_vol", f"{app.profile.nominal_volume:.1f}")
     _refresh_limits()
 
 

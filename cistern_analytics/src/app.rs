@@ -1164,7 +1164,10 @@ impl CisternApp {
             (Some(ta), Some(tb)) if tb > ta && (v_skip_start - v_skip_end) > 0.0 => {
                 Some((v_skip_start - v_skip_end) / (tb - ta))
             }
-            _ => if vol_l > (v1 + v3 + 0.1) && time_s > 0.0 { Some((vol_l - (v1 + v3)) / time_s) } else { None },
+            // Match the Python core: if the skip-window timestamps can't be resolved,
+            // the EN 14055 rate is undefined (don't divide the reduced volume by the
+            // full duration, which would understate the rate).
+            _ => None,
         };
 
         let t_now = self.flush_arm_min_t;
@@ -1853,6 +1856,7 @@ impl eframe::App for CisternApp {
                             }
                             CisternClass::Class2 => {
                                 if matches!(self.cistern_type_variant,
+                                    CisternTypeVariant::Type9 | CisternTypeVariant::Type7 |
                                     CisternTypeVariant::Type6 | CisternTypeVariant::Type5 | CisternTypeVariant::Type4)
                                 { self.cistern_type_variant = CisternTypeVariant::Max6_0; }
                             }
@@ -1864,11 +1868,15 @@ impl eframe::App for CisternApp {
                                 CisternClass::Class1 => {
                                     egui::ComboBox::from_id_source("cb_cistern_type")
                                         .selected_text(match self.cistern_type_variant {
+                                            CisternTypeVariant::Type9 => "Type 9",
+                                            CisternTypeVariant::Type7 => "Type 7",
                                             CisternTypeVariant::Type5 => "Type 5",
                                             CisternTypeVariant::Type4 => "Type 4",
                                             _                         => "Type 6",
                                         })
                                         .show_ui(ui, |ui| {
+                                            ui.selectable_value(&mut self.cistern_type_variant, CisternTypeVariant::Type9, "Type 9  (8.5–9.0 L full | 3.0–4.5 L part)");
+                                            ui.selectable_value(&mut self.cistern_type_variant, CisternTypeVariant::Type7, "Type 7  (7.0–7.5 L full | 3.0–4.0 L part)");
                                             ui.selectable_value(&mut self.cistern_type_variant, CisternTypeVariant::Type6, "Type 6  (6.0–6.5 L full | 3.0–4.0 L part)");
                                             ui.selectable_value(&mut self.cistern_type_variant, CisternTypeVariant::Type5, "Type 5  (4.5–5.5 L full | 3.0–4.0 L part)");
                                             ui.selectable_value(&mut self.cistern_type_variant, CisternTypeVariant::Type4, "Type 4  (4.0–4.5 L full | 2.0–3.0 L part)");
@@ -2104,6 +2112,8 @@ impl eframe::App for CisternApp {
                                         });
                                 }
                                 let type_str = match self.cistern_type_variant {
+                                    CisternTypeVariant::Type9  => "Type 9",
+                                    CisternTypeVariant::Type7  => "Type 7",
                                     CisternTypeVariant::Type6  => "Type 6",
                                     CisternTypeVariant::Type5  => "Type 5",
                                     CisternTypeVariant::Type4  => "Type 4",

@@ -69,6 +69,8 @@ pub enum CisternClass {
 #[derive(PartialEq, Clone, Copy, Debug, Default, Serialize, Deserialize)]
 pub enum CisternTypeVariant {
     // ── Class 1 ─────────────────────────────────────────────────────
+    Type9,   // Full: 8.5–9.0 L  | Part: 3.0–4.5 L
+    Type7,   // Full: 7.0–7.5 L  | Part: 3.0–4.0 L
     Type6,   // Full: 6.0–6.5 L  | Part: 3.0–4.0 L
     Type5,   // Full: 4.5–5.5 L  | Part: 3.0–4.0 L
     Type4,   // Full: 4.0–4.5 L  | Part: 2.0–3.0 L
@@ -121,6 +123,10 @@ pub fn validate_flush(
     match class {
         // ── Class 1: fixed absolute ranges from EN 14055 §4 ──────────
         CisternClass::Class1 => match (variant, is_part_flush) {
+            (CisternTypeVariant::Type9, false) => (8.5..=9.0).contains(&measured_vol_l),
+            (CisternTypeVariant::Type9, true)  => (3.0..=4.5).contains(&measured_vol_l),
+            (CisternTypeVariant::Type7, false) => (7.0..=7.5).contains(&measured_vol_l),
+            (CisternTypeVariant::Type7, true)  => (3.0..=4.0).contains(&measured_vol_l),
             (CisternTypeVariant::Type6, false) => (6.0..=6.5).contains(&measured_vol_l),
             (CisternTypeVariant::Type6, true)  => (3.0..=4.0).contains(&measured_vol_l),
             (CisternTypeVariant::Type5, false) => (4.5..=5.5).contains(&measured_vol_l),
@@ -156,6 +162,8 @@ pub fn get_en14055_skip_volumes(
         CisternClass::Class1 => {
             if !is_part_flush {
                 match variant {
+                    CisternTypeVariant::Type9 => (1.0, 5.0),
+                    CisternTypeVariant::Type7 => (1.0, 3.0),
                     CisternTypeVariant::Type6 => (1.0, 2.0),
                     CisternTypeVariant::Type5 => (1.0, 1.0),
                     CisternTypeVariant::Type4 => (1.0, 1.0),
@@ -204,6 +212,8 @@ pub fn get_en14055_volume_limits(
         CisternClass::Class1 => {
             if !is_part_flush {
                 match variant {
+                    CisternTypeVariant::Type9 => (8.5, 9.0),
+                    CisternTypeVariant::Type7 => (7.0, 7.5),
                     CisternTypeVariant::Type6 => (6.0, 6.5),
                     CisternTypeVariant::Type5 => (4.5, 5.5),
                     CisternTypeVariant::Type4 => (4.0, 4.5),
@@ -211,6 +221,8 @@ pub fn get_en14055_volume_limits(
                 }
             } else {
                 match variant {
+                    CisternTypeVariant::Type9 => (3.0, 4.5),
+                    CisternTypeVariant::Type7 => (3.0, 4.0),
                     CisternTypeVariant::Type6 => (3.0, 4.0),
                     CisternTypeVariant::Type5 => (3.0, 4.0),
                     CisternTypeVariant::Type4 => (2.0, 3.0),
@@ -753,9 +765,15 @@ mod tests {
 
     #[test]
     fn volume_limits_match_table3() {
+        assert_eq!(get_en14055_volume_limits(CisternClass::Class1, CisternTypeVariant::Type9, false, None), (8.5, 9.0));
+        assert_eq!(get_en14055_volume_limits(CisternClass::Class1, CisternTypeVariant::Type9, true,  None), (3.0, 4.5));
+        assert_eq!(get_en14055_volume_limits(CisternClass::Class1, CisternTypeVariant::Type7, false, None), (7.0, 7.5));
         assert_eq!(get_en14055_volume_limits(CisternClass::Class1, CisternTypeVariant::Type6, false, None), (6.0, 6.5));
         assert_eq!(get_en14055_volume_limits(CisternClass::Class1, CisternTypeVariant::Type4, true,  None), (2.0, 3.0));
         assert_eq!(get_en14055_volume_limits(CisternClass::Class2, CisternTypeVariant::L4_5,  false, None), (4.15, 4.85));
+        // Class 1 skip volumes for the larger nominal volumes (§5.3.3.3).
+        assert_eq!(get_en14055_skip_volumes(CisternClass::Class1, CisternTypeVariant::Type9, false), (1.0, 5.0));
+        assert_eq!(get_en14055_skip_volumes(CisternClass::Class1, CisternTypeVariant::Type7, false), (1.0, 3.0));
         // Class 2 part flush = 2/3 of measured full-flush average.
         let (_, max_l) = get_en14055_volume_limits(CisternClass::Class2, CisternTypeVariant::Max6_0, true, Some(5.4));
         assert!((max_l - 3.6).abs() < 1e-9);
