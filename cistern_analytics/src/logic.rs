@@ -126,6 +126,7 @@ pub fn validate_flush(
             (_, true) => last_full_vol_l
                 .map_or(false, |fv| measured_vol_l <= (2.0 / 3.0) * fv),
             _ => false, // Class 1 variant mis-selected with Class 2
+        },
     }
 }
 
