@@ -202,11 +202,13 @@ class CisternProfile:
     overflow: float = 0.0      # OF — overflow level (absolute height mm)
     water_discharge: float = 0.0
     residual_wl: float = 0.0   # RWL — Residual Water Level (min after flush)
+    nominal_volume: float = 6.0
+    cistern_class: int = 1     # 1 or 2
 
     def to_dict(self):
         d = {k: getattr(self, k) for k in
              ["name", "mwl", "mwl_fault", "meniscus", "cwl", "overflow",
-              "water_discharge", "residual_wl"]}
+              "water_discharge", "residual_wl", "nominal_volume", "cistern_class"]}
         d["points"] = [{"p": pt.p, "h": pt.h, "v": pt.v} for pt in self.points]
         return d
 
@@ -225,6 +227,8 @@ class CisternProfile:
             overflow=float(d.get("overflow", 0.0)),
             water_discharge=float(d.get("water_discharge", 0.0)),
             residual_wl=float(d.get("residual_wl", 0.0)),
+            nominal_volume=float(d.get("nominal_volume", 6.0)),
+            cistern_class=int(d.get("cistern_class", 1)),
         )
 
     def clone(self):
@@ -389,6 +393,104 @@ def build_request(port_idx):
         "data": {"datatosend": [f"/iolinkmaster/port[{port_idx}]/iolinkdevice/pdin"]}
     })
     return b'\x01\x0110' + f"{len(payload):08X}".encode() + payload.encode()
+
+
+# ── EN 14055 standard calculations ────────────────────────────────────
+def get_en14055_skip_volumes(nominal_volume: float, cistern_class: int, is_part_flush: bool) -> tuple[float, float]:
+    """
+    Returns (v1_skip, v3_skip) for the EN 14055 flow rate calculation.
+    """
+    v1 = 1.0
+    v3 = 2.0
+
+    if cistern_class == 2:
+        # Class 2 products (Section 6.10.4)
+        if not is_part_flush:
+            # Full flush: volume measured is V_full - 1.0 L.
+            # Start sensor at V_full - 0.5 L, stop sensor at 0.5 L remaining.
+            # Skip first 0.5 L and last 0.5 L of discharge.
+            v1 = 0.5
+            v3 = 0.5
+        else:
+            # Reduced flush: volume measured is V_red - 1.5 L.
+            # Start sensor at V_full - 1.0 L, stop sensor at V_full - V_red + 0.5 L.
+            # Skip first 1.0 L and last 0.5 L of discharge.
+            v1 = 1.0
+            v3 = 0.5
+    else:
+        # Class 1 products (Section 5.3.3.3)
+        if not is_part_flush:
+            if abs(nominal_volume - 9.0) < 0.1:
+                v1 = 1.0
+                v3 = 5.0
+            elif abs(nominal_volume - 7.0) < 0.1:
+                v1 = 1.0
+                v3 = 3.0
+            elif abs(nominal_volume - 6.0) < 0.1:
+                v1 = 1.0
+                v3 = 2.0
+            elif abs(nominal_volume - 5.0) < 0.1:
+                v1 = 1.0
+                v3 = 1.0
+            elif abs(nominal_volume - 4.0) < 0.1:
+                v1 = 1.0
+                v3 = 1.0
+        else:
+            v1 = 1.0
+            v3 = 0.5
+
+    return v1, v3
+
+
+def get_en14055_volume_limits(nominal_volume: float, cistern_class: int, is_part_flush: bool, avg_full_vol: float = None) -> tuple[float, float]:
+    """
+    Returns (min_limit, max_limit) for the given configuration.
+    """
+    if cistern_class == 2:
+        if not is_part_flush:
+            if abs(nominal_volume - 6.0) < 0.1:
+                return 0.0, 6.0
+            elif abs(nominal_volume - 4.5) < 0.1:
+                return 4.15, 4.85
+            elif abs(nominal_volume - 4.0) < 0.1:
+                return 3.70, 4.30
+            else:
+                return 0.0, nominal_volume
+        else:
+            max_limit = 4.0
+            if avg_full_vol is not None:
+                max_limit = (2.0 / 3.0) * avg_full_vol
+            elif nominal_volume is not None:
+                max_limit = (2.0 / 3.0) * nominal_volume
+            return 0.0, max_limit
+    else:
+        # Class 1 (Table 3)
+        if not is_part_flush:
+            if abs(nominal_volume - 9.0) < 0.1:
+                return 8.5, 9.0
+            elif abs(nominal_volume - 7.0) < 0.1:
+                return 7.0, 7.5
+            elif abs(nominal_volume - 6.0) < 0.1:
+                return 6.0, 6.5
+            elif abs(nominal_volume - 5.0) < 0.1:
+                return 4.5, 5.5
+            elif abs(nominal_volume - 4.0) < 0.1:
+                return 4.0, 4.5
+            else:
+                return nominal_volume * 0.9, nominal_volume * 1.1
+        else:
+            if abs(nominal_volume - 9.0) < 0.1:
+                return 3.0, 4.5
+            elif abs(nominal_volume - 7.0) < 0.1:
+                return 3.0, 4.0
+            elif abs(nominal_volume - 6.0) < 0.1:
+                return 3.0, 4.0
+            elif abs(nominal_volume - 5.0) < 0.1:
+                return 3.0, 4.0
+            elif abs(nominal_volume - 4.0) < 0.1:
+                return 2.0, 3.0
+            else:
+                return 0.0, nominal_volume * 0.67
 
 
 # ── Application logic ────────────────────────────────────────────────
@@ -808,9 +910,14 @@ class SensorApp:
 
         en14055_rate = None
         en14055_note = None
-        if delta_vol > 3.0 and len(self.flush_record_buf) > 2:
-            v_skip_start = start_v - 1.0          # skip first 1 L
-            v_skip_end   = end_v   + 2.0           # skip last 2 L
+        
+        is_part = "Part" in self.flush_type
+        v1, v3 = get_en14055_skip_volumes(self.profile.nominal_volume, self.profile.cistern_class, is_part)
+        
+        # Ensure we have enough volume to perform the skip window
+        if delta_vol > (v1 + v3 + 0.1) and len(self.flush_record_buf) > 2:
+            v_skip_start = start_v - v1
+            v_skip_end   = end_v   + v3
             t1 = next((s[0] for s in self.flush_record_buf if s[2] <= v_skip_start), None)
             t2 = next((s[0] for s in self.flush_record_buf if s[2] <= v_skip_end),   None)
             if t1 is not None and t2 is not None and t2 > t1:
@@ -818,7 +925,10 @@ class SensorApp:
                 eff_time = t2 - t1
                 if eff_time > 0 and eff_vol > 0:
                     en14055_rate = eff_vol / eff_time
-                    en14055_note = "Excl. first 1 L and last 2 L (V2 method)"
+                    if self.profile.cistern_class == 2:
+                        en14055_note = f"Excl. first {v1:.1f} L and last {v3:.1f} L (Class 2)"
+                    else:
+                        en14055_note = f"Excl. first {v1:.1f} L and last {v3:.1f} L (Class 1)"
                 else:
                     en14055_note = "N/A (flush window too short)"
             else:
@@ -928,25 +1038,54 @@ def run_compliance_checks(
     if flush_results:
         full = [r for r in flush_results if "Full" in r["type"]]
         part = [r for r in flush_results if "Part" in r["type"]]
+        
+        avg_full = None
+        if full:
+            avg_full = sum(r["vol"] for r in full) / len(full)
+            
         if full:
             if len(full) < EN14055_REQUIRED_FLUSH_COUNT:
                 results.append(f"[WARN] Full flush: only {len(full)}/{EN14055_REQUIRED_FLUSH_COUNT} measurements (§5.2.1 requires 3)")
-            avg_full = sum(r["vol"] for r in full) / len(full)
-            tag = "PASS" if avg_full <= EN14055_FULL_FLUSH_MAX_L else "FAIL"
-            results.append(f"[{tag}] Full flush avg: {avg_full:.2f} L (limit {EN14055_FULL_FLUSH_MAX_L} L)")
+            min_l, max_l = get_en14055_volume_limits(p.nominal_volume, p.cistern_class, is_part_flush=False)
+            tag = "PASS" if min_l <= avg_full <= max_l else "FAIL"
+            results.append(f"[{tag}] Full flush avg: {avg_full:.2f} L (limit {min_l:.2f}–{max_l:.2f} L)")
+            
             en_rates = [r["en14055_rate"] for r in full if r.get("en14055_rate") is not None]
             if en_rates:
                 avg_rate = sum(en_rates) / len(en_rates)
-                results.append(f"[INFO] Full flush EN14055 flow rate (V2 method): {avg_rate:.3f} L/s")
+                rate_tag = "INFO"
+                rate_limit_str = ""
+                if p.cistern_class == 2:
+                    rate_tag = "PASS" if avg_rate >= 1.85 else "FAIL"
+                    rate_limit_str = " (limit >= 1.85 L/s)"
+                results.append(f"[{rate_tag}] Full flush EN14055 flow rate: {avg_rate:.3f} L/s{rate_limit_str}")
+                
             temps = [r["temp_c"] for r in full if r.get("temp_c") is not None]
             if temps:
                 results.append(f"[INFO] Water temp during full flushes: {min(temps):.1f}–{max(temps):.1f} °C (EN 14055 §5.1: 15±5 °C)")
+                
         if part:
             if len(part) < EN14055_REQUIRED_FLUSH_COUNT:
                 results.append(f"[WARN] Part flush: only {len(part)}/{EN14055_REQUIRED_FLUSH_COUNT} measurements (§5.2.1 requires 3)")
             avg_part = sum(r["vol"] for r in part) / len(part)
-            tag = "PASS" if avg_part <= EN14055_PART_FLUSH_MAX_L else "FAIL"
-            results.append(f"[{tag}] Part flush avg: {avg_part:.2f} L (limit {EN14055_PART_FLUSH_MAX_L} L)")
+            if p.cistern_class == 2 and avg_full is None:
+                # Class 2 part limit is 2/3 of the *measured* full-flush average,
+                # so it cannot be evaluated until a full flush has been recorded.
+                results.append(f"[----] Part flush avg: {avg_part:.2f} L — record a full flush first (Class 2 part limit is ⅔ of measured full-flush average)")
+            else:
+                min_l, max_l = get_en14055_volume_limits(p.nominal_volume, p.cistern_class, is_part_flush=True, avg_full_vol=avg_full)
+                tag = "PASS" if min_l <= avg_part <= max_l else "FAIL"
+                results.append(f"[{tag}] Part flush avg: {avg_part:.2f} L (limit {min_l:.2f}–{max_l:.2f} L)")
+            
+            en_rates = [r["en14055_rate"] for r in part if r.get("en14055_rate") is not None]
+            if en_rates:
+                avg_rate = sum(en_rates) / len(en_rates)
+                rate_tag = "INFO"
+                rate_limit_str = ""
+                if p.cistern_class == 2:
+                    rate_tag = "PASS" if avg_rate >= 1.6 else "FAIL"
+                    rate_limit_str = " (limit >= 1.60 L/s)"
+                results.append(f"[{rate_tag}] Part flush EN14055 flow rate: {avg_rate:.3f} L/s{rate_limit_str}")
     else:
         results.append("[----] Flush volume: no measurements yet")
 

@@ -169,6 +169,24 @@ def _toggle_connect():
             _bind_status("lbl_conn", "theme_red")
 
 
+def _on_class_change(sender, app_data):
+    cls = int(app_data.replace("Class ", ""))
+    app.profile.cistern_class = cls
+    # Auto-correct the nominal volume to a valid option for the selected class
+    # (Class 1: 4/5/6/7/9 L; Class 2: 4/4.5/6 L) to prevent invalid combinations.
+    valid = [4.0, 4.5, 6.0] if cls == 2 else [4.0, 5.0, 6.0, 7.0, 9.0]
+    if app.profile.nominal_volume not in valid:
+        app.profile.nominal_volume = 6.0
+        if dpg.does_item_exist("combo_nom_vol"):
+            dpg.set_value("combo_nom_vol", f"{app.profile.nominal_volume:.1f}")
+    _refresh_limits()
+
+
+def _on_vol_change(sender, app_data):
+    app.profile.nominal_volume = float(app_data)
+    _refresh_limits()
+
+
 # ── EN 14055 limit callbacks ───────────────────────────────────────
 def _set_mwl():
     val = app.get_avg_height()
@@ -251,7 +269,7 @@ def _refresh_limits():
     cache.set_if_exists("lbl_cwl", _mm_rel(p.cwl) if p.cwl > 0 else "\u2014")
     cache.set_if_exists("lbl_wd", _mm(p.water_discharge))
     cache.set_if_exists("lbl_overflow", _mm(of))
-    cache.set_if_exists("lbl_profile", f"Active Profile: {p.name}")
+    cache.set_if_exists("lbl_profile", f"Active Profile: {p.name} (Class {p.cistern_class}, {p.nominal_volume:.1f}L)")
     cache.set_if_exists("lbl_residual", _mm(p.residual_wl))
 
     w = app.app_settings.get("avg_window", 0.5)
@@ -282,6 +300,11 @@ def _refresh_limits():
     else:
         cache.set_if_exists("lbl_airgap", "CWL: \u2014 (capture during fault test)")
         _bind_status("lbl_airgap", "theme_gray")
+
+    if dpg.does_item_exist("combo_class"):
+        dpg.set_value("combo_class", f"Class {p.cistern_class}")
+    if dpg.does_item_exist("combo_nom_vol"):
+        dpg.set_value("combo_nom_vol", f"{p.nominal_volume:.1f}")
 
 
 # ── Flush callbacks ─────────────────────────────────────────────────
@@ -1686,6 +1709,11 @@ def _build_left_panel():
         # Flush Test (collapsible)
         with dpg.collapsing_header(label="FLUSH TEST (EN 14055)", tag="hdr_flush",
                                     default_open=True):
+            with dpg.group(horizontal=True):
+                dpg.add_combo(["Class 1", "Class 2"], default_value=f"Class {app.profile.cistern_class}", tag="combo_class", width=145, callback=_on_class_change)
+                dpg.add_spacer(width=10)
+                dpg.add_combo(["4.0", "4.5", "5.0", "6.0", "7.0", "9.0"], default_value=f"{app.profile.nominal_volume:.1f}", tag="combo_nom_vol", width=145, callback=_on_vol_change)
+            dpg.add_spacer(height=3)
             with dpg.group(horizontal=True):
                 dpg.add_text("Type:", color=COL_GRAY)
                 dpg.add_combo(["Full Flush", "Part Flush"],

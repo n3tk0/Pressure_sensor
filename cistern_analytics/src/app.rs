@@ -1,6 +1,7 @@
 use crate::sensor::{SensorCore, SensorEvent};
-use crate::logic::{CisternProfile, CalibrationPoint, FlushResult, CisternClass, CisternTypeVariant,
-                   run_compliance_checks, validate_flush, smooth, smooth_last};
+use crate::logic::{CisternProfile, CalibrationPoint, FlushResult, FlushPair, CisternClass, CisternTypeVariant,
+                   run_compliance_checks, validate_flush, smooth, smooth_last, get_en14055_skip_volumes,
+                   flush_pairs_to_results};
 use eframe::egui;
 use egui::{Color32, RichText, Key, Modifiers};
 use egui_extras::{TableBuilder, Column};
@@ -268,8 +269,6 @@ pub struct CisternApp {
     // EN 14055 cistern class / type selection (persisted in settings)
     cistern_class: CisternClass,
     cistern_type_variant: CisternTypeVariant,
-    // Compliance result for the most-recently completed flush
-    last_compliance: Option<bool>,
 }
 
 impl CisternApp {
@@ -373,7 +372,6 @@ impl CisternApp {
             wizard_step: 0,
             cistern_class: CisternClass::Class2,
             cistern_type_variant: CisternTypeVariant::Max6_0,
-            last_compliance: None,
         }
     }
 
@@ -1152,9 +1150,10 @@ impl CisternApp {
         let vol_l  = (start_v - end_v).abs();
         let time_s = (end_t - start_t).abs();
 
-        // EN 14055 V2: skip first 1L and last 2L from rate window
-        let v_skip_start = start_v - 1.0;  // volume after removing first 1L consumed
-        let v_skip_end   = end_v   + 2.0;  // volume before last 2L consumed
+        // EN 14055 skip volumes based on class and variant
+        let (v1, v3) = get_en14055_skip_volumes(self.cistern_class, self.cistern_type_variant, !is_full);
+        let v_skip_start = start_v - v1;
+        let v_skip_end   = end_v   + v3;
         let t1 = self.flush_record_buf.iter()
             .find(|s| s[2] <= v_skip_start)
             .map(|s| s[0]);
@@ -1165,7 +1164,10 @@ impl CisternApp {
             (Some(ta), Some(tb)) if tb > ta && (v_skip_start - v_skip_end) > 0.0 => {
                 Some((v_skip_start - v_skip_end) / (tb - ta))
             }
-            _ => if vol_l > 3.0 && time_s > 0.0 { Some((vol_l - 3.0) / time_s) } else { None },
+            // Match the Python core: if the skip-window timestamps can't be resolved,
+            // the EN 14055 rate is undefined (don't divide the reduced volume by the
+            // full duration, which would understate the rate).
+            _ => None,
         };
 
         let t_now = self.flush_arm_min_t;
@@ -1573,7 +1575,7 @@ impl eframe::App for CisternApp {
                 ui.menu_button("Test", |ui| {
                     if ui.button("EN 14055 Compliance Check").clicked() {
                         let flat = flush_pairs_to_results(&self.flush_pairs);
-                        self.compliance_results = run_compliance_checks(&self.profile, &flat);
+                        self.compliance_results = run_compliance_checks(&self.profile, self.cistern_class, self.cistern_type_variant, &flat);
                         self.show_compliance_modal = true;
                         ui.close_menu();
                     }
@@ -1854,6 +1856,7 @@ impl eframe::App for CisternApp {
                             }
                             CisternClass::Class2 => {
                                 if matches!(self.cistern_type_variant,
+                                    CisternTypeVariant::Type9 | CisternTypeVariant::Type7 |
                                     CisternTypeVariant::Type6 | CisternTypeVariant::Type5 | CisternTypeVariant::Type4)
                                 { self.cistern_type_variant = CisternTypeVariant::Max6_0; }
                             }
@@ -1865,76 +1868,19 @@ impl eframe::App for CisternApp {
                                 CisternClass::Class1 => {
                                     egui::ComboBox::from_id_source("cb_cistern_type")
                                         .selected_text(match self.cistern_type_variant {
+                                            CisternTypeVariant::Type9 => "Type 9",
+                                            CisternTypeVariant::Type7 => "Type 7",
                                             CisternTypeVariant::Type5 => "Type 5",
                                             CisternTypeVariant::Type4 => "Type 4",
                                             _                         => "Type 6",
                                         })
                                         .show_ui(ui, |ui| {
+                                            ui.selectable_value(&mut self.cistern_type_variant, CisternTypeVariant::Type9, "Type 9  (8.5–9.0 L full | 3.0–4.5 L part)");
+                                            ui.selectable_value(&mut self.cistern_type_variant, CisternTypeVariant::Type7, "Type 7  (7.0–7.5 L full | 3.0–4.0 L part)");
                                             ui.selectable_value(&mut self.cistern_type_variant, CisternTypeVariant::Type6, "Type 6  (6.0–6.5 L full | 3.0–4.0 L part)");
                                             ui.selectable_value(&mut self.cistern_type_variant, CisternTypeVariant::Type5, "Type 5  (4.5–5.5 L full | 3.0–4.0 L part)");
                                             ui.selectable_value(&mut self.cistern_type_variant, CisternTypeVariant::Type4, "Type 4  (4.0–4.5 L full | 2.0–3.0 L part)");
                                         });
-                                }
-                                CisternClass::Class2 => {
-                                    egui::ComboBox::from_id_source("cb_cistern_type")
-                                        .selected_text(match self.cistern_type_variant {
-                                            CisternTypeVariant::L4_5  => "4.5L",
-                                            CisternTypeVariant::L4_0  => "4.0L",
-                                            _                         => "Max 6.0L",
-                                        })
-                                        .show_ui(ui, |ui| {
-                                            ui.selectable_value(&mut self.cistern_type_variant, CisternTypeVariant::Max6_0, "Max 6.0L  (≤ 6.0 L)");
-                                            ui.selectable_value(&mut self.cistern_type_variant, CisternTypeVariant::L4_5,   "4.5L  (4.15–4.85 L)");
-                                            ui.selectable_value(&mut self.cistern_type_variant, CisternTypeVariant::L4_0,   "4.0L  (3.70–4.30 L)");
-                                        });
-                                }
-                            }
-                        });
-                        // ── Flush Type ─────────────────────────────────────────────
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("Cistern Class:").color(self.col_gray()));
-                            egui::ComboBox::from_id_source("cb_cistern_class")
-                                .selected_text(match self.cistern_class {
-                                    CisternClass::Class1 => "Class 1",
-                                    CisternClass::Class2 => "Class 2",
-                                })
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(&mut self.cistern_class, CisternClass::Class2, "Class 2");
-                                    ui.selectable_value(&mut self.cistern_class, CisternClass::Class1, "Class 1");
-                                });
-                        });
-                        
-                        // Item 4: Stop Flush confirmation guard
-                        if self.stop_flush_confirm {
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new("Stop and save this measurement?").color(self.col_orange()));
-                                if ui.button("Yes, Stop").clicked() {
-                                    self.stop_flush_confirm = false;
-                                    self.is_flushing = false;
-                                    // Use snapshot captured at "Stop" click — not dialog-close time
-                                    let is_full = self.flush_type_idx == 0;
-                                    let vol_l = (self.flush_start_vol - self.flush_pending_end_vol).abs();
-                                    let time_s = (self.flush_pending_end_t - self.flush_start_time).abs();
-                                    let en14055_rate = if vol_l > 3.0 && time_s > 0.0 {
-                                        Some((vol_l - 3.0) / time_s)
-                                    } else { None };
-                                    // EN 14055 volume compliance — Class 2 part flush needs the last full flush vol
-                                    let last_full_vol = self.flushes.iter().filter(|f| f.is_full).last().map(|f| f.vol_l);
-                                    let pass = validate_flush(
-                                        self.cistern_class,
-                                        self.cistern_type_variant,
-                                        !is_full,
-                                        vol_l,
-                                        last_full_vol,
-                                    );
-                                    self.last_compliance = Some(pass);
-                                    // Item 7: VLine at the moment "Stop" was clicked
-                                    self.flush_vlines.push((self.flush_pending_end_t, is_full));
-                                    self.flushes.push(FlushResult {
-                                        is_full, vol_l, time_s, en14055_rate,
-                                        temp_c: self.current_temp,
-                                        compliance_pass: Some(pass),
-                                    });
                                 }
                                 CisternClass::Class2 => {
                                     egui::ComboBox::from_id_source("cb_cistern_type")
@@ -2086,8 +2032,6 @@ impl eframe::App for CisternApp {
                         }
                         ui.label(RichText::new("* EN L/s = rate excl. first 1 L and last 2 L (V2 method)").color(self.col_gray()));
 
-                        ui.label(RichText::new("* EN L/s = rate excl. first 1 L + last 2 L").color(self.col_gray()));
-
                         // ── Paired flush table ─────────────────────────────────────
                         // Columns: # | F.Vol | F.EN | F.T | P.Vol | P.EN | P.T | Del
                         TableBuilder::new(ui)
@@ -2168,6 +2112,8 @@ impl eframe::App for CisternApp {
                                         });
                                 }
                                 let type_str = match self.cistern_type_variant {
+                                    CisternTypeVariant::Type9  => "Type 9",
+                                    CisternTypeVariant::Type7  => "Type 7",
                                     CisternTypeVariant::Type6  => "Type 6",
                                     CisternTypeVariant::Type5  => "Type 5",
                                     CisternTypeVariant::Type4  => "Type 4",
@@ -2177,40 +2123,9 @@ impl eframe::App for CisternApp {
                                 };
                                 ui.label(RichText::new(type_str).color(self.col_gray()));
                             });
-                        // ── Compliance Result indicator ────────────────────────────
-                        if let Some(pass) = self.last_compliance {
-                            ui.add_space(4.0);
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new("Last flush:").color(self.col_gray()));
-                                let (label, fill) = if pass {
-                                    ("  PASS  ", self.col_btn_success())
-                                } else {
-                                    ("  FAIL  ", self.col_btn_danger())
-                                };
-                                egui::Frame::none()
-                                    .fill(fill)
-                                    .rounding(egui::Rounding::same(4.0))
-                                    .inner_margin(egui::Margin::symmetric(4.0, 2.0))
-                                    .show(ui, |ui| {
-                                        ui.label(RichText::new(label).color(Color32::WHITE).strong());
-                                    });
-                                let class_str = match self.cistern_class {
-                                    CisternClass::Class1 => "Class 1",
-                                    CisternClass::Class2 => "Class 2",
-                                };
-                                let type_str = match self.cistern_type_variant {
-                                    CisternTypeVariant::Type6  => "Type 6",
-                                    CisternTypeVariant::Type5  => "Type 5",
-                                    CisternTypeVariant::Type4  => "Type 4",
-                                    CisternTypeVariant::Max6_0 => "Max 6L",
-                                    CisternTypeVariant::L4_5   => "4.5L",
-                                    CisternTypeVariant::L4_0   => "4.0L",
-                                };
-                                ui.label(RichText::new(format!("({} {})", class_str, type_str)).color(self.col_gray()));
-                            });
                             ui.add_space(2.0);
                         }
-                        if !self.flushes.is_empty() {
+                        if !self.flush_pairs.is_empty() {
                             ui.horizontal(|ui| {
                                 // Item 14: confirm before clearing all flushes
                                 if self.clear_flushes_confirm {
@@ -2220,7 +2135,6 @@ impl eframe::App for CisternApp {
                                         self.flush_vlines.clear();
                                         self.flush_pending_full = None;
                                         self.clear_flushes_confirm = false;
-                                        self.last_compliance = None;
                                     }
                                     if ui.button("Cancel").clicked() { self.clear_flushes_confirm = false; }
                                 } else {
@@ -2228,7 +2142,7 @@ impl eframe::App for CisternApp {
                                     if !self.flush_pairs.is_empty() {
                                         if ui.button("Compliance Check").clicked() {
                                             let flat = flush_pairs_to_results(&self.flush_pairs);
-                                            self.compliance_results = run_compliance_checks(&self.profile, &flat);
+                                            self.compliance_results = run_compliance_checks(&self.profile, self.cistern_class, self.cistern_type_variant, &flat);
                                             self.show_compliance_modal = true;
                                         }
                                     }
