@@ -13,6 +13,15 @@ on:
       - 'fonts/**'
       - 'icon.ico'
       - '.github/workflows/build-exe.yml'
+  pull_request:
+    paths:
+      - 'main.py'
+      - 'sensor_core.py'
+      - 'dpg_theme.py'
+      - 'main.spec'
+      - 'fonts/**'
+      - 'icon.ico'
+      - '.github/workflows/build-exe.yml'
   workflow_dispatch:   # allow manual trigger from GitHub Actions tab
 
 permissions:

@@ -172,18 +172,26 @@ def _toggle_connect():
 def _on_class_change(sender, app_data):
     cls = int(app_data.replace("Class ", ""))
     app.profile.cistern_class = cls
-    # Auto-correct the nominal volume to a valid option for the selected class
-    # (Class 1: 4/5/6/7/9 L; Class 2: 4/4.5/6 L) to prevent invalid combinations.
-    valid = [4.0, 4.5, 6.0] if cls == 2 else [4.0, 5.0, 6.0, 7.0, 9.0]
-    if app.profile.nominal_volume not in valid:
-        app.profile.nominal_volume = 6.0
-        if dpg.does_item_exist("combo_nom_vol"):
-            dpg.set_value("combo_nom_vol", f"{app.profile.nominal_volume:.1f}")
+    # Rebuild the nominal-volume dropdown to offer only volumes valid for this
+    # class (Class 1: 4/5/6/7/9 L; Class 2: 4/4.5/6 L) and snap the current
+    # value to a valid option, preventing invalid combinations.
+    valid = core.valid_nominal_volumes(cls)
+    app.profile.nominal_volume = core.coerce_nominal_volume(cls, app.profile.nominal_volume)
+    if dpg.does_item_exist("combo_nom_vol"):
+        dpg.configure_item("combo_nom_vol", items=[f"{v:.1f}" for v in valid])
+        dpg.set_value("combo_nom_vol", f"{app.profile.nominal_volume:.1f}")
     _refresh_limits()
 
 
 def _on_vol_change(sender, app_data):
-    app.profile.nominal_volume = float(app_data)
+    # Snap to a valid volume for the current class. The dropdown is already
+    # class-filtered, but this keeps the profile correct even if a stale value
+    # slips through (e.g. when loading an older profile).
+    requested = float(app_data)
+    vol = core.coerce_nominal_volume(app.profile.cistern_class, requested)
+    app.profile.nominal_volume = vol
+    if dpg.does_item_exist("combo_nom_vol") and abs(vol - requested) > 0.01:
+        dpg.set_value("combo_nom_vol", f"{vol:.1f}")
     _refresh_limits()
 
 
@@ -1712,7 +1720,7 @@ def _build_left_panel():
             with dpg.group(horizontal=True):
                 dpg.add_combo(["Class 1", "Class 2"], default_value=f"Class {app.profile.cistern_class}", tag="combo_class", width=145, callback=_on_class_change)
                 dpg.add_spacer(width=10)
-                dpg.add_combo(["4.0", "4.5", "5.0", "6.0", "7.0", "9.0"], default_value=f"{app.profile.nominal_volume:.1f}", tag="combo_nom_vol", width=145, callback=_on_vol_change)
+                dpg.add_combo([f"{v:.1f}" for v in core.valid_nominal_volumes(app.profile.cistern_class)], default_value=f"{app.profile.nominal_volume:.1f}", tag="combo_nom_vol", width=145, callback=_on_vol_change)
             dpg.add_spacer(height=3)
             with dpg.group(horizontal=True):
                 dpg.add_text("Type:", color=COL_GRAY)

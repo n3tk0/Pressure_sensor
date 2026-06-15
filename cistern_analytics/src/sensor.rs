@@ -174,10 +174,10 @@ impl SensorCore {
                                                 Self::fast_extract_pdin(js_str, io_port)
                                             {
                                                 // Validate pressure range
-                                                if pressure >= PRESSURE_MIN_BAR && pressure <= PRESSURE_MAX_BAR {
+                                                if (PRESSURE_MIN_BAR..=PRESSURE_MAX_BAR).contains(&pressure) {
                                                     // Apply temp offset then validate range
                                                     let validated_temp = temp.map(|t| t + temp_offset).filter(|&t| {
-                                                        t >= TEMP_MIN_C && t <= TEMP_MAX_C
+                                                        (TEMP_MIN_C..=TEMP_MAX_C).contains(&t)
                                                     });
                                                     let (h, v) = profile.interp_hv(pressure);
                                                     let _ = tx_evt.send(SensorEvent::Data(TelemetryData {

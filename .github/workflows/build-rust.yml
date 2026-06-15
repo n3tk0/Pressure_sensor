@@ -9,6 +9,11 @@ on:
       - 'cistern_analytics/**'
       - 'icon.ico'
       - '.github/workflows/build-rust.yml'
+  pull_request:
+    paths:
+      - 'cistern_analytics/**'
+      - 'icon.ico'
+      - '.github/workflows/build-rust.yml'
   workflow_dispatch:   # allow manual trigger from GitHub Actions tab
 
 permissions:
