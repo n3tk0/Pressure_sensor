@@ -1683,9 +1683,13 @@ impl eframe::App for CisternApp {
                     // 2. EN 14055 LIMITS
                     egui::CollapsingHeader::new(RichText::new("EN 14055 LIMITS").strong()).default_open(true).show(ui, |ui| {
                         ui.horizontal(|ui| {
+                            // Split the row evenly so the two buttons together span the
+                            // same overall width as the full-width buttons below.
+                            let spacing = ui.spacing().item_spacing.x;
+                            let bw = (ui.available_width() - spacing) / 2.0;
                             let avg_lbl = format!("Set WL (avg {}s)", self.setting_avg_window);
                             let b1 = egui::Button::new(RichText::new(&avg_lbl).color(self.col_text())).fill(self.col_bg_btn());
-                            if ui.add_sized([150.0, 24.0], b1).clicked() {
+                            if ui.add_sized([bw, 24.0], b1).clicked() {
                                 let avg = self.get_avg_height();
                                 self.profile.mwl = avg;
                                 self.cwl_state = AutoState::Armed;
@@ -1697,7 +1701,7 @@ impl eframe::App for CisternApp {
                             }
 
                             let b2 = egui::Button::new(RichText::new("Set Meniscus").color(self.col_text())).fill(self.col_bg_btn());
-                            if ui.add_sized([150.0, 24.0], b2).clicked() {
+                            if ui.add_sized([bw, 24.0], b2).clicked() {
                                 if self.profile.overflow > 0.0 {
                                     self.profile.meniscus = self.get_avg_height() - self.profile.overflow;
                                 } else {
@@ -1835,7 +1839,6 @@ impl eframe::App for CisternApp {
                     egui::CollapsingHeader::new(RichText::new("FLUSH TEST (EN 14055)").strong()).default_open(true).show(ui, |ui| {
                         // ── Row 1: Cistern Class switch + Type/Volume selector ──────
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new("Cistern Class:").color(self.col_gray()));
                             // Segmented switch (tight spacing for a connected look)
                             ui.scope(|ui| {
                                 ui.spacing_mut().item_spacing.x = 2.0;
