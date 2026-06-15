@@ -1417,12 +1417,13 @@ impl eframe::App for CisternApp {
                             self.cwl_timer = Some(Instant::now());
                         }
                     } else if self.cwl_state == AutoState::Waiting
-                        && self.cwl_timer.is_some_and(|t| t.elapsed().as_secs_f64() >= 2.0) {
-                            self.profile.cwl = self.get_avg_height();
-                            self.profile.mwl_fault = self.cwl_peak;
-                            self.cwl_state = AutoState::Done;
-                            self.show_toast("CWL & MWL fault captured automatically.");
-                        }
+                        && self.cwl_timer.is_some_and(|t| t.elapsed().as_secs_f64() >= 2.0)
+                    {
+                        self.profile.cwl = self.get_avg_height();
+                        self.profile.mwl_fault = self.cwl_peak;
+                        self.cwl_state = AutoState::Done;
+                        self.show_toast("CWL & MWL fault captured automatically.");
+                    }
 
                     // ── RWL auto-detect state machine ──────────────────
                     if self.rwl_state == AutoState::Armed {
@@ -1433,11 +1434,12 @@ impl eframe::App for CisternApp {
                             self.rwl_timer = Some(Instant::now());
                         }
                     } else if self.rwl_state == AutoState::Waiting
-                        && self.rwl_timer.is_some_and(|t| t.elapsed().as_secs_f64() >= 2.0) {
-                            self.profile.residual_wl = self.get_avg_height();
-                            self.rwl_state = AutoState::Done;
-                            self.show_toast("Residual WL captured.");
-                        }
+                        && self.rwl_timer.is_some_and(|t| t.elapsed().as_secs_f64() >= 2.0)
+                    {
+                        self.profile.residual_wl = self.get_avg_height();
+                        self.rwl_state = AutoState::Done;
+                        self.show_toast("Residual WL captured.");
+                    }
 
                     // Flush ARM auto-detection tick
                     self.tick_flush_arm(pt.time_s, pt.height_mm, pt.volume_l);
@@ -2132,11 +2134,12 @@ impl eframe::App for CisternApp {
                                 } else {
                                     if ui.button("Clear All").clicked() { self.clear_flushes_confirm = true; }
                                     if !self.flush_pairs.is_empty()
-                                        && ui.button("Compliance Check").clicked() {
-                                            let flat = flush_pairs_to_results(&self.flush_pairs);
-                                            self.compliance_results = run_compliance_checks(&self.profile, self.cistern_class, self.cistern_type_variant, &flat);
-                                            self.show_compliance_modal = true;
-                                        }
+                                        && ui.button("Compliance Check").clicked()
+                                    {
+                                        let flat = flush_pairs_to_results(&self.flush_pairs);
+                                        self.compliance_results = run_compliance_checks(&self.profile, self.cistern_class, self.cistern_type_variant, &flat);
+                                        self.show_compliance_modal = true;
+                                    }
                                 }
                             });
                         }
@@ -2266,10 +2269,11 @@ impl eframe::App for CisternApp {
                             ui.close_menu();
                         }
                         if !show_extras
-                            && ui.button("Reset Zoom").on_hover_text("Reset chart pan/zoom to fit all data").clicked() {
-                                self.reset_zoom = true;
-                                ui.close_menu();
-                            }
+                            && ui.button("Reset Zoom").on_hover_text("Reset chart pan/zoom to fit all data").clicked()
+                        {
+                            self.reset_zoom = true;
+                            ui.close_menu();
+                        }
                     });
 
                     // "Clear" delta button — just left of "..."
