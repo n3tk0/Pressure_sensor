@@ -8,7 +8,7 @@ use egui_extras::{TableBuilder, Column};
 use egui_plot::{Line, Plot, HLine, Points, VLine};
 use std::fs::File;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 use chrono::Local;
 use serde::{Serialize, Deserialize};
@@ -273,9 +273,8 @@ pub struct CisternApp {
 
 impl CisternApp {
     pub fn new() -> Self {
-        let mut prof = CisternProfile::default();
-        prof.name = "Untitled Profile".to_string();
-        
+        let prof = CisternProfile { name: "Untitled Profile".to_string(), ..Default::default() };
+
         Self {
             sensor: SensorCore::new(),
             profile: prof,
@@ -393,7 +392,7 @@ impl CisternApp {
     }
 
     fn toast_active(&self) -> bool {
-        self.toast_until.map_or(false, |t| Instant::now() < t)
+        self.toast_until.is_some_and(|t| Instant::now() < t)
     }
 
     // ── Averaging window helper (mirrors Python get_avg_height) ──────────
@@ -436,7 +435,7 @@ impl CisternApp {
     }
 
     /// Record a path in the recent profiles list (item 6).
-    fn push_recent(&mut self, path: &PathBuf) {
+    fn push_recent(&mut self, path: &Path) {
         let s = path.to_string_lossy().to_string();
         self.recent_profiles.retain(|r| r != &s);
         self.recent_profiles.insert(0, s);
@@ -451,7 +450,7 @@ impl CisternApp {
             .set_title("Save Profile")
             .set_directory(&default)
             .add_filter("JSON profile", &["json"])
-            .set_file_name(&format!("{}.json", self.profile.name))
+            .set_file_name(format!("{}.json", self.profile.name))
             .save_file()
         {
             self.save_profile_to(&path);
@@ -778,7 +777,7 @@ impl CisternApp {
 
             // Validation message
             if !self.cal_validation_msg.is_empty() {
-                ui.colored_label(self.col_red(), &self.cal_validation_msg.clone());
+                ui.colored_label(self.col_red(), self.cal_validation_msg.clone());
             }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
@@ -1417,14 +1416,13 @@ impl eframe::App for CisternApp {
                             self.cwl_state = AutoState::Waiting;
                             self.cwl_timer = Some(Instant::now());
                         }
-                    } else if self.cwl_state == AutoState::Waiting {
-                        if self.cwl_timer.map_or(false, |t| t.elapsed().as_secs_f64() >= 2.0) {
+                    } else if self.cwl_state == AutoState::Waiting
+                        && self.cwl_timer.is_some_and(|t| t.elapsed().as_secs_f64() >= 2.0) {
                             self.profile.cwl = self.get_avg_height();
                             self.profile.mwl_fault = self.cwl_peak;
                             self.cwl_state = AutoState::Done;
                             self.show_toast("CWL & MWL fault captured automatically.");
                         }
-                    }
 
                     // ── RWL auto-detect state machine ──────────────────
                     if self.rwl_state == AutoState::Armed {
@@ -1434,13 +1432,12 @@ impl eframe::App for CisternApp {
                             self.rwl_state = AutoState::Waiting;
                             self.rwl_timer = Some(Instant::now());
                         }
-                    } else if self.rwl_state == AutoState::Waiting {
-                        if self.rwl_timer.map_or(false, |t| t.elapsed().as_secs_f64() >= 2.0) {
+                    } else if self.rwl_state == AutoState::Waiting
+                        && self.rwl_timer.is_some_and(|t| t.elapsed().as_secs_f64() >= 2.0) {
                             self.profile.residual_wl = self.get_avg_height();
                             self.rwl_state = AutoState::Done;
                             self.show_toast("Residual WL captured.");
                         }
-                    }
 
                     // Flush ARM auto-detection tick
                     self.tick_flush_arm(pt.time_s, pt.height_mm, pt.volume_l);
@@ -2134,13 +2131,12 @@ impl eframe::App for CisternApp {
                                     if ui.button("Cancel").clicked() { self.clear_flushes_confirm = false; }
                                 } else {
                                     if ui.button("Clear All").clicked() { self.clear_flushes_confirm = true; }
-                                    if !self.flush_pairs.is_empty() {
-                                        if ui.button("Compliance Check").clicked() {
+                                    if !self.flush_pairs.is_empty()
+                                        && ui.button("Compliance Check").clicked() {
                                             let flat = flush_pairs_to_results(&self.flush_pairs);
                                             self.compliance_results = run_compliance_checks(&self.profile, self.cistern_class, self.cistern_type_variant, &flat);
                                             self.show_compliance_modal = true;
                                         }
-                                    }
                                 }
                             });
                         }
@@ -2269,12 +2265,11 @@ impl eframe::App for CisternApp {
                             }
                             ui.close_menu();
                         }
-                        if !show_extras {
-                            if ui.button("Reset Zoom").on_hover_text("Reset chart pan/zoom to fit all data").clicked() {
+                        if !show_extras
+                            && ui.button("Reset Zoom").on_hover_text("Reset chart pan/zoom to fit all data").clicked() {
                                 self.reset_zoom = true;
                                 ui.close_menu();
                             }
-                        }
                     });
 
                     // "Clear" delta button — just left of "..."

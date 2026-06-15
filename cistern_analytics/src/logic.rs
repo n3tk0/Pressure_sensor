@@ -142,7 +142,7 @@ pub fn validate_flush(
             (CisternTypeVariant::L4_0,   false) => (3.70..=4.30).contains(&measured_vol_l),
             // Part flush: ≤ 2/3 × last measured full flush
             (_, true) => last_full_vol_l
-                .map_or(false, |fv| measured_vol_l <= (2.0 / 3.0) * fv),
+                .is_some_and(|fv| measured_vol_l <= (2.0 / 3.0) * fv),
             _ => false, // Class 1 variant mis-selected with Class 2
         },
     }
@@ -200,7 +200,7 @@ pub fn get_en14055_volume_limits(
                 }
             } else {
                 // Part flush: ≤ 2/3 × measured full-flush average (nominal fallback).
-                let basis = avg_full_vol.unwrap_or_else(|| match variant {
+                let basis = avg_full_vol.unwrap_or(match variant {
                     CisternTypeVariant::L4_5 => 4.5,
                     CisternTypeVariant::L4_0 => 4.0,
                     _ => 6.0,
@@ -289,7 +289,7 @@ pub fn run_compliance_checks(
     // 4. Meniscus − OF ≤ 5 mm (§5.2.4c)
     if p.meniscus != 0.0 {
         let m = p.meniscus;
-        if m >= 0.0 && m <= EN14055_MENISCUS_MAX_ABOVE_OF_MM {
+        if (0.0..=EN14055_MENISCUS_MAX_ABOVE_OF_MM).contains(&m) {
             flags.push(format!("[PASS] Meniscus: +{:.1} mm above OF ≤ 5 mm", m));
         } else if m > EN14055_MENISCUS_MAX_ABOVE_OF_MM {
             flags.push(format!("[FAIL] Meniscus: +{:.1} mm above OF > 5 mm", m));
@@ -480,10 +480,10 @@ pub fn smooth(data: &[f64], alg: &str) -> Vec<f64> {
         let mut p_est = 1.0_f64;
         let mut r = Vec::with_capacity(n);
         r.push(x_est);
-        for i in 1..n {
+        for &d in &data[1..] {
             let p_pred = p_est + q;
             let k = p_pred / (p_pred + r_noise);
-            x_est += k * (data[i] - x_est);
+            x_est += k * (d - x_est);
             p_est = (1.0 - k) * p_pred;
             r.push(x_est);
         }
@@ -541,6 +541,9 @@ pub fn smooth_last(data: &[f64], alg: &str) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    // Tests build profiles with `let mut p = Default::default(); p.field = …;`,
+    // which is clear and convenient for one-off fixtures.
+    #![allow(clippy::field_reassign_with_default)]
     use super::*;
 
     // ── interp_hv ───────────────────────────────────────────────────────────
@@ -808,6 +811,57 @@ mod tests {
         }).collect();
         let flags = run_compliance_checks(&p, CisternClass::Class2, CisternTypeVariant::Max6_0, &results);
         assert!(flags.iter().any(|f| f.contains("[FAIL]") && f.contains("flow rate")));
+    }
+
+    #[test]
+    fn matches_python_golden_en14055_tables() {
+        // Single source of truth shared with the Python suite (tests/en14055_golden.csv).
+        // If either implementation drifts, this assertion fails in that language.
+        let csv = include_str!("../../tests/en14055_golden.csv");
+
+        fn variant_for(class: i32, nominal: f64) -> CisternTypeVariant {
+            let near = |a: f64, b: f64| (a - b).abs() < 0.05;
+            if class == 1 {
+                if near(nominal, 9.0) { CisternTypeVariant::Type9 }
+                else if near(nominal, 7.0) { CisternTypeVariant::Type7 }
+                else if near(nominal, 6.0) { CisternTypeVariant::Type6 }
+                else if near(nominal, 5.0) { CisternTypeVariant::Type5 }
+                else { CisternTypeVariant::Type4 }
+            } else if near(nominal, 4.5) { CisternTypeVariant::L4_5 }
+            else if near(nominal, 4.0) { CisternTypeVariant::L4_0 }
+            else { CisternTypeVariant::Max6_0 }
+        }
+
+        let mut checked = 0;
+        for raw in csv.lines() {
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with('#') { continue; }
+            let f: Vec<&str> = line.split(',').collect();
+            assert_eq!(f.len(), 6, "malformed golden row: {line}");
+            let kind = f[0];
+            let class: i32 = f[1].parse().unwrap();
+            let nominal: f64 = f[2].parse().unwrap();
+            let is_part = f[3] == "1";
+            let a: f64 = f[4].parse().unwrap();
+            let b: f64 = f[5].parse().unwrap();
+            let cclass = if class == 1 { CisternClass::Class1 } else { CisternClass::Class2 };
+            let variant = variant_for(class, nominal);
+            match kind {
+                "limits" => {
+                    let (mn, mx) = get_en14055_volume_limits(cclass, variant, is_part, None);
+                    assert!((mn - a).abs() < 1e-9 && (mx - b).abs() < 1e-9,
+                        "limits class={class} nom={nominal} part={is_part}: got ({mn},{mx}) want ({a},{b})");
+                }
+                "skip" => {
+                    let (v1, v3) = get_en14055_skip_volumes(cclass, variant, is_part);
+                    assert!((v1 - a).abs() < 1e-9 && (v3 - b).abs() < 1e-9,
+                        "skip class={class} nom={nominal} part={is_part}: got ({v1},{v3}) want ({a},{b})");
+                }
+                other => panic!("unknown golden row kind: {other}"),
+            }
+            checked += 1;
+        }
+        assert!(checked > 0, "golden file produced no rows");
     }
 }
 

@@ -442,6 +442,30 @@ def get_en14055_skip_volumes(nominal_volume: float, cistern_class: int, is_part_
     return v1, v3
 
 
+# Standard EN 14055 nominal flush volumes per cistern class.
+EN14055_VALID_NOMINAL_VOLUMES: dict[int, list[float]] = {
+    1: [4.0, 5.0, 6.0, 7.0, 9.0],   # Class 1 types (Type 4/5/6/7/9)
+    2: [4.0, 4.5, 6.0],             # Class 2 volumes (4.0 / 4.5 / ≤6.0 L)
+}
+
+
+def valid_nominal_volumes(cistern_class: int) -> list[float]:
+    """Return the list of standard nominal flush volumes valid for a class."""
+    return EN14055_VALID_NOMINAL_VOLUMES.get(cistern_class, EN14055_VALID_NOMINAL_VOLUMES[1])
+
+
+def coerce_nominal_volume(cistern_class: int, nominal_volume: float) -> float:
+    """Snap nominal_volume to a valid value for the class.
+
+    Returns the matching standard volume when within tolerance, otherwise 6.0 L
+    (valid for both classes) as a safe default.
+    """
+    for v in valid_nominal_volumes(cistern_class):
+        if abs(v - nominal_volume) < 0.01:
+            return v
+    return 6.0
+
+
 def get_en14055_volume_limits(nominal_volume: float, cistern_class: int, is_part_flush: bool, avg_full_vol: float = None) -> tuple[float, float]:
     """
     Returns (min_limit, max_limit) for the given configuration.
