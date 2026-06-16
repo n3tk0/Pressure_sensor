@@ -2041,14 +2041,22 @@ impl eframe::App for CisternApp {
                             .inner_margin(egui::Margin::same(4.0))
                             .show(ui, |ui| {
                                 let mut to_del = None;
+                                // Spread the 8 columns across the full panel width so the table
+                                // matches the surrounding buttons instead of shrinking to content.
+                                let spacing_x = 6.0;
+                                let per_col = ((ui.available_width() - spacing_x * 7.0) / 8.0).max(8.0);
+                                // Font as large as fits 8 columns in the side panel: one step above
+                                // the body/small midpoint (the column count caps the usable size).
+                                let body_sz  = egui::TextStyle::Body.resolve(ui.style()).size;
+                                let small_sz = egui::TextStyle::Small.resolve(ui.style()).size;
+                                let cell_font = egui::FontId::proportional(((body_sz + small_sz) / 2.0 + 1.0).min(body_sz));
                                 egui::Grid::new("flush_pairs_grid")
                                     .striped(true)
                                     .num_columns(8)
-                                    .min_col_width(6.0)
-                                    .spacing(egui::vec2(6.0, 3.0))
+                                    .min_col_width(per_col)
+                                    .spacing(egui::vec2(spacing_x, 3.0))
                                     .show(ui, |ui| {
-                                        // Compact text so all 8 columns fit inside the side panel.
-                                        ui.style_mut().override_text_style = Some(egui::TextStyle::Small);
+                                        ui.style_mut().override_font_id = Some(cell_font);
                                         // Header row
                                         for h in ["#", "F.Vol", "F.L/s", "F.T", "P.Vol", "P.L/s", "P.T", "Del"] {
                                             ui.label(RichText::new(h).strong().color(self.col_gray()));
