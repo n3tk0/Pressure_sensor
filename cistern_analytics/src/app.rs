@@ -2048,7 +2048,12 @@ impl eframe::App for CisternApp {
                                     .spacing(egui::vec2(6.0, 3.0))
                                     .show(ui, |ui| {
                                         // Compact text so all 8 columns fit inside the side panel.
-                                        ui.style_mut().override_text_style = Some(egui::TextStyle::Small);
+                                        // Use a size midway between the default body text (too big)
+                                        // and TextStyle::Small (too small).
+                                        let body_sz  = egui::TextStyle::Body.resolve(ui.style()).size;
+                                        let small_sz = egui::TextStyle::Small.resolve(ui.style()).size;
+                                        ui.style_mut().override_font_id =
+                                            Some(egui::FontId::proportional((body_sz + small_sz) / 2.0));
                                         // Header row
                                         for h in ["#", "F.Vol", "F.L/s", "F.T", "P.Vol", "P.L/s", "P.T", "Del"] {
                                             ui.label(RichText::new(h).strong().color(self.col_gray()));
