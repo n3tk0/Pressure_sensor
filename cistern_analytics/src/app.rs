@@ -2038,14 +2038,17 @@ impl eframe::App for CisternApp {
                         egui::Frame::none()
                             .fill(self.col_bg_btn())
                             .rounding(egui::Rounding::same(4.0))
-                            .inner_margin(egui::Margin::same(6.0))
+                            .inner_margin(egui::Margin::same(4.0))
                             .show(ui, |ui| {
                                 let mut to_del = None;
                                 egui::Grid::new("flush_pairs_grid")
                                     .striped(true)
                                     .num_columns(8)
-                                    .spacing(egui::vec2(12.0, 4.0))
+                                    .min_col_width(6.0)
+                                    .spacing(egui::vec2(6.0, 3.0))
                                     .show(ui, |ui| {
+                                        // Compact text so all 8 columns fit inside the side panel.
+                                        ui.style_mut().override_text_style = Some(egui::TextStyle::Small);
                                         // Header row
                                         for h in ["#", "F.Vol", "F.L/s", "F.T", "P.Vol", "P.L/s", "P.T", "Del"] {
                                             ui.label(RichText::new(h).strong().color(self.col_gray()));
